@@ -16,6 +16,8 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
+load_dotenv()
+
 class LocationEnricher:
     def __init__(self):
         self.google_api_key = os.getenv('GOOGLE_MAPS_API_KEY')

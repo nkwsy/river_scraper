@@ -7,12 +7,17 @@ from main import StreetEndFinder
 from render_map import StreetEndRenderer
 from enrich_data import LocationEnricher
 import json
+from google_maps_export import GoogleMapsExporter
+import geopandas as gpd
+import numpy as np
 
 class GlobalCityAnalyzer:
     def __init__(self):
         self.output_dir = Path('global_analysis')
         self.output_dir.mkdir(exist_ok=True)
         self.setup_logging()
+        self.maps_exporter = GoogleMapsExporter()
+        self.analyzed_cities = []  # Add this to track cities
         
     def setup_logging(self):
         logging.basicConfig(
@@ -40,7 +45,7 @@ class GlobalCityAnalyzer:
             logging.error(f"Error getting city list: {str(e)}")
             return None
 
-    def get_top_us_cities(self):
+    def get_top_us_cities(self, num_cities=20):
         """Get list of top 20 US cities by population"""
         try:
             url = "http://download.geonames.org/export/dump/cities15000.zip"
@@ -69,20 +74,28 @@ class GlobalCityAnalyzer:
             
             # Find street ends
             finder = StreetEndFinder(city_name, threshold_distance=10)
-            water_features, near_water = finder.process()
+            water_features, near_water = finder.process()  # This saves to street_ends_near_river.geojson
             
-            # Save GeoJSON
+            # Skip if no water-adjacent street ends found
+            if not near_water or len(near_water) == 0:
+                logging.info(f"Skipping {city_name}: No water-adjacent street ends found")
+                return None
+            
+            # Copy the GeoJSON file to city directory
+            source_geojson = 'street_ends_near_river.geojson'
             geojson_path = city_dir / 'street_ends.geojson'
             
-            # Render map
-            renderer = StreetEndRenderer('street_ends_near_river.geojson', city_name)
+            # Read and save to new location
+            gdf = gpd.read_file(source_geojson)
+            gdf.to_file(str(geojson_path), driver='GeoJSON')
+            
+            # Continue with rest of analysis
+            renderer = StreetEndRenderer(str(geojson_path), city_name)
             renderer.render(str(city_dir / 'map.html'))
             
-            # Enrich data
             enricher = LocationEnricher()
             results = enricher.process_locations(str(geojson_path))
             
-            # Save city summary
             summary = {
                 'city_name': city_name,
                 'population': city_row['population'],
@@ -96,6 +109,9 @@ class GlobalCityAnalyzer:
             with open(city_dir / 'summary.json', 'w') as f:
                 json.dump(summary, f, indent=2)
                 
+            # Add city to analyzed list
+            self.analyzed_cities.append(city_name)
+            
             return summary
             
         except Exception as e:
@@ -122,9 +138,14 @@ class GlobalCityAnalyzer:
         # Generate final report
         self.generate_report(results)
         
-    def run_us_analysis(self):
+    def run_us_analysis(self, num_cities=20, target_cities=None):
         """Analyze top 20 US cities"""
-        cities = self.get_top_us_cities()
+
+        if target_cities is None:
+            cities = self.get_top_us_cities(num_cities)
+        else:
+            cities = self.get_target_cities(target_cities)
+
         if cities is None:
             logging.error("Failed to get US city list")
             return
@@ -147,18 +168,33 @@ class GlobalCityAnalyzer:
         try:
             df = pd.DataFrame(results)
             
-            # Basic statistics
+            # Convert int64 to regular int for JSON serialization
             stats = {
-                'total_cities_analyzed': len(results),
-                'total_street_ends_found': df['total_street_ends'].sum(),
-                'average_street_ends_per_city': df['total_street_ends'].mean(),
-                'cities_by_street_ends': df.nlargest(10, 'total_street_ends')[['city_name', 'total_street_ends']].to_dict(),
+                'total_cities_analyzed': int(len(results)),
+                'total_street_ends_found': int(df['total_street_ends'].sum()),
+                'average_street_ends_per_city': float(df['total_street_ends'].mean()),
+                'cities_by_street_ends': df.nlargest(10, 'total_street_ends')[['city_name', 'total_street_ends']].to_dict('records'),
                 'analysis_date': time.strftime('%Y-%m-%d')
             }
+            
+            # Convert any remaining int64 values in the results
+            def convert_int64(obj):
+                if isinstance(obj, np.int64):
+                    return int(obj)
+                elif isinstance(obj, dict):
+                    return {k: convert_int64(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_int64(item) for item in obj]
+                return obj
+            
+            stats = convert_int64(stats)
             
             # Save statistics
             with open(self.output_dir / f'{filename_prefix}_statistics.json', 'w') as f:
                 json.dump(stats, f, indent=2)
+            
+            # Generate map link
+            map_link = self.maps_exporter.export_cities(self.analyzed_cities)
             
             # Generate HTML report
             html_report = f"""
@@ -171,6 +207,7 @@ class GlobalCityAnalyzer:
                     <div class="container mt-5">
                         <h1>Global Street Ends Analysis</h1>
                         <p>Analysis Date: {stats['analysis_date']}</p>
+                        <p><a href="{map_link}" target="_blank">View All Street Ends on Google Maps</a></p>
                         <h2>Summary Statistics</h2>
                         <ul>
                             <li>Total Cities Analyzed: {stats['total_cities_analyzed']}</li>
@@ -183,6 +220,7 @@ class GlobalCityAnalyzer:
                                 <tr>
                                     <th>City</th>
                                     <th>Street Ends</th>
+                                    <th>Action</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -200,15 +238,58 @@ class GlobalCityAnalyzer:
         except Exception as e:
             logging.error(f"Error generating report: {str(e)}")
 
-    def _generate_table_rows(self, cities_dict):
+    def _generate_table_rows(self, cities_data):
+        """Generate HTML table rows from city data"""
         rows = ""
-        for city in cities_dict['city_name'].values():
-            street_ends = cities_dict['total_street_ends'][list(cities_dict['city_name'].keys())[0]]
-            rows += f"<tr><td>{city}</td><td>{street_ends}</td></tr>"
+        for city in cities_data:
+            city_name = city['city_name'].split(',')[0].strip()
+            map_path = f"US/{city_name}/map.html"
+            
+            # Check if map exists
+            if (self.output_dir / map_path).exists():
+                rows += f"""
+                    <tr>
+                        <td>{city['city_name']}</td>
+                        <td>{city['total_street_ends']}</td>
+                        <td><a href="{map_path}" target="_blank" class="btn btn-sm btn-primary">View Map</a></td>
+                    </tr>
+                """
+            else:
+                rows += f"""
+                    <tr>
+                        <td>{city['city_name']}</td>
+                        <td>{city['total_street_ends']}</td>
+                        <td>No map available</td>
+                    </tr>
+                """
         return rows
+
+    def get_target_cities(self, target_cities):
+        """Get data for specific target cities"""
+        try:
+            url = "http://download.geonames.org/export/dump/cities15000.zip"
+            df = pd.read_csv(url, compression='zip', sep='\t', header=None,
+                           names=['geonameid', 'name', 'asciiname', 'alternatenames', 'latitude', 
+                                'longitude', 'feature_class', 'feature_code', 'country_code', 
+                                'cc2', 'admin1_code', 'admin2_code', 'admin3_code', 'admin4_code',
+                                'population', 'elevation', 'dem', 'timezone', 'modification_date'])
+            
+            # Filter for specified cities
+            target_cities_df = df[df['name'].isin(target_cities) & (df['feature_class'] == 'P')]
+            
+            if len(target_cities_df) == 0:
+                logging.warning(f"No matching cities found for: {target_cities}")
+                return None
+            
+            return target_cities_df
+            
+        except Exception as e:
+            logging.error(f"Error getting target cities: {str(e)}")
+            return None
 
 if __name__ == "__main__":
     analyzer = GlobalCityAnalyzer()
     # Choose which analysis to run
-    analyzer.run_us_analysis()  # For US cities only
+    # analyzer.run_us_analysis(num_cities=20)  # For US cities only
     # analyzer.run_global_analysis()  # For global analysis 
+    analyzer.run_us_analysis(target_cities=["Skokie"])

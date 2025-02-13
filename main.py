@@ -4,6 +4,9 @@ import osmnx as ox
 import geopandas as gpd
 from shapely.geometry import Point
 
+from enrich_data import LocationEnricher
+from render_map import StreetEndRenderer
+
 class StreetEndFinder:
     def __init__(self, location, threshold_distance=10):
         self.location = location
@@ -23,8 +26,8 @@ class StreetEndFinder:
         
         # Get water features
         water_tags = {
-            "natural": ["water", "stream", "riverbank"],
-            "waterway": ["river", "stream", "canal"]
+            "natural": [ "stream", "riverbank"],
+            "water": ["river", "stream", "canal"]
         }
         self.water_features = ox.features_from_place(self.location, tags=water_tags)
         
@@ -80,7 +83,7 @@ class StreetEndFinder:
 # Example usage:
 if __name__ == "__main__":
     # Can be run for different cities
-    cities = ["Chicago, USA", "Boston, USA"]
+    cities = ["Skokie, USA"]
     for city in cities:
         # Find street ends
         finder = StreetEndFinder(city, threshold_distance=10)
@@ -90,3 +93,7 @@ if __name__ == "__main__":
         output_file = f"street_ends_{city.split(',')[0].lower()}.html"
         renderer = StreetEndRenderer('street_ends_near_river.geojson', city)
         renderer.render(output_file)
+
+        # enrich data
+        enricher = LocationEnricher()
+        enricher.process_locations('street_ends_near_river.geojson')

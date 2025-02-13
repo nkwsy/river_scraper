@@ -17,10 +17,30 @@ class StreetEndRenderer:
         })
         
     def create_map(self):
-        """Initialize the map"""
+        """Initialize the map with both default and satellite layers"""
         center_lat = self.points.geometry.y.mean()
         center_lon = self.points.geometry.x.mean()
-        self.map = folium.Map(location=[center_lat, center_lon], zoom_start=14)
+        
+        # Create map with default OpenStreetMap layer
+        self.map = folium.Map(
+            location=[center_lat, center_lon],
+            zoom_start=14,
+            control_scale=True
+        )
+        
+        # Add satellite layer
+        folium.TileLayer(
+            tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+            attr='Google Satellite',
+            name='Satellite View',
+            overlay=False
+        ).add_to(self.map)
+        
+        # Rename the default layer
+        folium.TileLayer(
+            name='Street View',
+            control=True
+        ).add_to(self.map)
         
     def add_water_features(self):
         """Add water features to the map"""

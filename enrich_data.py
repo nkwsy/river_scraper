@@ -57,46 +57,83 @@ class LocationEnricher:
 
     def get_census_data(self, lat, lon):
         """Get demographic data from Census API"""
-        # You'll need to adjust these variables based on which Census API endpoints you want to use
-        url = f"https://api.census.gov/data/2019/acs/acs5"
-        params = {
-            'get': 'B19013_001E,B01003_001E',  # Median income, Population
-            'for': 'tract:*',
-            'in': f'state:{state_fips}+county:{county_fips}',
-            'key': self.census_api_key
-        }
-        response = requests.get(url, params=params)
-        if response.status_code == 200:
-            return response.json()
+        try:
+            # First get FIPS codes using Census Geocoding API
+            geocode_url = f"https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
+            params = {
+                "x": lon,
+                "y": lat,
+                "benchmark": "Public_AR_Current",
+                "vintage": "Current_Current",
+                "layers": "Census Tracts",
+                "format": "json"
+            }
+            
+            response = requests.get(geocode_url, params=params)
+            if response.status_code != 200:
+                return None
+            
+            result = response.json()
+            tract_info = result['result']['geographies']['Census Tracts'][0]
+            
+            # Get census data using FIPS codes
+            census_url = "https://api.census.gov/data/2020/acs/acs5"
+            census_params = {
+                "get": "NAME,B19013_001E,B01003_001E",  # Name, Median Income, Population
+                "for": f"tract:{tract_info['TRACT']}",
+                "in": f"state:{tract_info['STATE']} county:{tract_info['COUNTY']}",
+                "key": self.census_api_key
+            }
+            
+            census_response = requests.get(census_url, params=census_params)
+            if census_response.status_code == 200:
+                data = census_response.json()
+                # Convert array response to dictionary
+                headers = data[0]
+                values = data[1]
+                return dict(zip(headers, values))
+            
+        except Exception as e:
+            logging.error(f"Census API error: {str(e)}")
+        
         return None
 
     def calculate_greenspace(self, lat, lon):
         """Calculate available greenspace within 1 mile radius"""
-        # Convert 1 mile to meters
-        radius = self.radius_miles * 1609.34
-        
-        # Create a point and buffer
-        point = Point(lon, lat)
-        buffer_area = point.buffer(radius / 111000)  # approximate degree conversion
-        
-        # Get parks and green areas
-        tags = {
-            'leisure': ['park', 'garden', 'nature_reserve'],
-            'landuse': ['grass', 'forest', 'recreation_ground'],
-            'natural': ['wood', 'grassland', 'water']
-        }
-        
-        green_areas = ox.features_from_polygon(buffer_area, tags=tags)
-        if len(green_areas) > 0:
-            total_area = green_areas.geometry.area.sum()
-            buffer_total_area = buffer_area.area
-            green_percentage = (total_area / buffer_total_area) * 100
-            return {
-                'green_percentage': green_percentage,
-                'num_parks': len(green_areas[green_areas['leisure'] == 'park']),
-                'total_green_areas': len(green_areas)
+        try:
+            # Convert 1 mile to meters
+            radius = self.radius_miles * 1609.34
+            
+            # Create a point and buffer
+            point = Point(lon, lat)
+            buffer_area = point.buffer(radius / 111000)  # approximate degree conversion
+            
+            # Get parks and green areas
+            tags = {
+                'leisure': ['park', 'garden', 'nature_reserve'],
+                'landuse': ['grass', 'forest', 'recreation_ground'],
+                'natural': ['wood', 'grassland', 'water']
             }
-        return None
+            
+            green_areas = ox.features_from_polygon(buffer_area, tags=tags)
+            if len(green_areas) > 0:
+                # Convert to projected CRS for accurate area calculation
+                green_areas = green_areas.to_crs('EPSG:3857')  # Web Mercator projection
+                buffer_gdf = gpd.GeoDataFrame(geometry=[buffer_area], crs='EPSG:4326').to_crs('EPSG:3857')
+                
+                total_area = green_areas.geometry.area.sum()
+                buffer_total_area = buffer_gdf.geometry.area[0]
+                green_percentage = (total_area / buffer_total_area) * 100
+                
+                return {
+                    'green_percentage': green_percentage,
+                    'num_parks': len(green_areas[green_areas['leisure'] == 'park']),
+                    'total_green_areas': len(green_areas)
+                }
+            return None
+        except Exception as e:
+            logging.error(f"Error calculating greenspace: {str(e)}")
+            return None
 
     def get_waterway_info(self, lat, lon):
         """Get information about nearby waterways"""

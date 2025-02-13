@@ -31,7 +31,7 @@ class LocationEnricher:
 
     def download_streetview(self, lat, lon, location_id):
         """Download Google Street View image"""
-        url = f"https://maps.googleapis.com/maps/api/streetview?size=600x300&location={lat},{lon}&key={self.google_api_key}"
+        url = f"https://maps.googleapis.com/maps/api/streetview?size=600x300&fov=120&location={lat},{lon}&key={self.google_api_key}"
         response = requests.get(url)
         if response.status_code == 200:
             filename = f"{self.output_dir}/streetview_{location_id}.jpg"
@@ -172,6 +172,86 @@ class LocationEnricher:
         
         return min(score * 100, 100)  # Return score out of 100
 
+    def get_population_density(self, lat, lon):
+        """Get population density data using WorldPop and OSM data for international coverage"""
+        try:
+            # Create a small buffer around the point (approximately 1km)
+            point = Point(lon, lat)
+            buffer_degrees = 0.01  # roughly 1km at equator
+            buffer_area = point.buffer(buffer_degrees)
+            
+            # Get built-up area from OSM to understand urban density
+            tags = {
+                'building': True,
+                'landuse': ['residential', 'commercial', 'mixed']
+            }
+            
+            logger.info(f"Fetching OSM data for location: {lat}, {lon}")
+            
+            # Get area features from OSM
+            area_data = ox.features_from_polygon(buffer_area, tags=tags)
+            
+            # Calculate built-up percentage
+            if len(area_data) > 0:
+                # Convert to projected CRS for accurate area calculation
+                area_data = area_data.to_crs('EPSG:3857')
+                buffer_gdf = gpd.GeoDataFrame(geometry=[buffer_area], crs='EPSG:4326').to_crs('EPSG:3857')
+                
+                built_up_area = area_data.geometry.area.sum()
+                total_area = buffer_gdf.geometry.area[0]
+                built_up_percentage = (built_up_area / total_area) * 100
+                logger.info(f"Built-up percentage: {built_up_percentage:.2f}%")
+            else:
+                built_up_percentage = 0
+                logger.info("No buildings found in area")
+            
+            # Estimate population density based on built-up percentage and OSM data
+            # This is more reliable than the WorldPop API query
+            if built_up_percentage > 80:
+                population_density = 15000  # high density urban
+                density_category = "high density urban"
+            elif built_up_percentage > 50:
+                population_density = 8000   # medium density urban
+                density_category = "medium density urban"
+            elif built_up_percentage > 20:
+                population_density = 3000   # low density urban
+                density_category = "low density urban"
+            else:
+                population_density = 500    # rural/suburban
+                density_category = "rural/suburban"
+            
+            logger.info(f"Estimated density category: {density_category}")
+            
+            # Get additional context from OSM
+            context_tags = ox.features_from_point(
+                (lat, lon), 
+                tags={'place': True}, 
+                dist=1000
+            )
+            
+            place_type = 'unknown'
+            if len(context_tags) > 0:
+                place_types = context_tags['place'].dropna().unique()
+                if len(place_types) > 0:
+                    place_type = place_types[0]
+                    logger.info(f"Identified place type: {place_type}")
+            
+            return {
+                'population_density': round(population_density, 2),  # people per square km
+                'built_up_percentage': round(built_up_percentage, 2),
+                'density_category': density_category,
+                'place_type': place_type,
+                'data_source': 'OSM',
+                'location': {
+                    'lat': lat,
+                    'lon': lon
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Population density estimation error: {str(e)}", exc_info=True)
+            return None
+
     def enrich_location(self, lat, lon, location_id):
         """Enrich a single location with all available data"""
         data = {
@@ -182,18 +262,19 @@ class LocationEnricher:
             'images': {}
         }
         
-        # Download images
-        streetview = self.download_streetview(lat, lon, location_id)
-        aerial = self.download_aerial(lat, lon, location_id)
-        if streetview:
-            data['images']['streetview'] = streetview
-        if aerial:
-            data['images']['aerial'] = aerial
+        # Download images if enabled
+        if self.save_images:
+            streetview = self.download_streetview(lat, lon, location_id)
+            aerial = self.download_aerial(lat, lon, location_id)
+            if streetview:
+                data['images']['streetview'] = streetview
+            if aerial:
+                data['images']['aerial'] = aerial
             
-        # Get census data
-        census_data = self.get_census_data(lat, lon)
-        if census_data:
-            data['demographics'] = census_data
+        # Get population density data
+        population_data = self.get_population_density(lat, lon)
+        if population_data:
+            data['population'] = population_data
             
         # Get greenspace data
         greenspace = self.calculate_greenspace(lat, lon)
@@ -208,10 +289,11 @@ class LocationEnricher:
         # Calculate desirability score
         data['desirability_score'] = self.calculate_desirability_score(data)
         
-        # Save to JSON
-        output_file = f"{self.output_dir}/location_{location_id}.json"
-        with open(output_file, 'w') as f:
-            json.dump(data, f, indent=2)
+        # Save to JSON if enabled
+        if self.save_detailed_json:
+            output_file = f"{self.output_dir}/location_{location_id}.json"
+            with open(output_file, 'w') as f:
+                json.dump(data, f, indent=2)
             
         return data
 

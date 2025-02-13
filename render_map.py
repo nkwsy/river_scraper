@@ -1,9 +1,11 @@
 import folium
 import geopandas as gpd
 import osmnx as ox
+from utils.logging_config import setup_logger
 
 class StreetEndRenderer:
     def __init__(self, points_file, location):
+        self.logger = setup_logger(__name__)
         self.points = gpd.read_file(points_file)
         self.location = location
         self.water_features = None
@@ -13,7 +15,7 @@ class StreetEndRenderer:
         """Get water features for the location"""
         self.water_features = ox.features_from_place(self.location, tags={
             "natural": ["water", "stream", "riverbank"],
-            "waterway": ["river", "stream", "canal"]
+            "water": ["river", "stream", "canal"]
         })
         
     def create_map(self):
@@ -79,7 +81,7 @@ class StreetEndRenderer:
         self.add_points()
         folium.LayerControl().add_to(self.map)
         self.map.save(output_file)
-        print(f"Map saved to {output_file}")
+        self.logger.info(f"Map saved to {output_file}")
 
 # Example usage:
 if __name__ == "__main__":

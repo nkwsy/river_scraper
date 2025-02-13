@@ -7,14 +7,10 @@ from shapely.geometry import Point, box
 import osmnx as ox
 from datetime import datetime
 from dotenv import load_dotenv
-import logging
+from utils.logging_config import setup_logger
 
-# Set up logging
-logging.basicConfig(
-    filename='location_enrichment.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Create logger for this module
+logger = setup_logger(__name__)
 
 load_dotenv()
 
@@ -94,7 +90,7 @@ class LocationEnricher:
                 return dict(zip(headers, values))
             
         except Exception as e:
-            logging.error(f"Census API error: {str(e)}")
+            logger.error(f"Census API error: {str(e)}")
         
         return None
 
@@ -132,7 +128,7 @@ class LocationEnricher:
                 }
             return None
         except Exception as e:
-            logging.error(f"Error calculating greenspace: {str(e)}")
+            logger.error(f"Error calculating greenspace: {str(e)}")
             return None
 
     def get_waterway_info(self, lat, lon):
@@ -229,7 +225,7 @@ class LocationEnricher:
                 break
                 
             lat, lon = point.geometry.y, point.geometry.x
-            logging.info(f"Processing location {idx}: {lat}, {lon}")
+            logger.info(f"Processing location {idx}: {lat}, {lon}")
             
             result = self.enrich_location(lat, lon, idx)
             if result:

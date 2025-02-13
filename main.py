@@ -6,9 +6,11 @@ from shapely.geometry import Point
 
 from enrich_data import LocationEnricher
 from render_map import StreetEndRenderer
+from utils.logging_config import setup_logger
 
 class StreetEndFinder:
     def __init__(self, location, threshold_distance=10):
+        self.logger = setup_logger(__name__)
         self.location = location
         self.threshold_distance = threshold_distance
         self.water_features = None
@@ -18,7 +20,7 @@ class StreetEndFinder:
         
     def get_data(self):
         """Download street and water data"""
-        print(f"\nProcessing {self.location}")
+        self.logger.info(f"Processing {self.location}")
         
         # Get street network
         graph = ox.graph_from_place(self.location, network_type='all')
@@ -31,28 +33,28 @@ class StreetEndFinder:
         }
         self.water_features = ox.features_from_place(self.location, tags=water_tags)
         
-        print(f"Found {len(self.water_features)} water features")
-        print(f"Found {len(self.streets)} streets")
+        self.logger.info(f"Found {len(self.water_features)} water features")
+        self.logger.info(f"Found {len(self.streets)} streets")
         
     def find_street_ends(self):
         """Identify all street endpoints"""
-        print("Collecting street ends...")
+        self.logger.info("Collecting street ends...")
         for _, row in self.streets.iterrows():
             start_point = Point(row['geometry'].coords[0])
             end_point = Point(row['geometry'].coords[-1])
             self.street_ends.append(start_point)
             self.street_ends.append(end_point)
-        print(f"Collected {len(self.street_ends)} street ends")
+        self.logger.info(f"Collected {len(self.street_ends)} street ends")
         
     def find_near_water(self):
         """Find street ends near water"""
         river_geom = self.water_features.geometry.unary_union
         seen_coords = set()
-        print(f"\nChecking proximity to water (threshold: {self.threshold_distance}m)...")
+        self.logger.info(f"\nChecking proximity to water (threshold: {self.threshold_distance}m)...")
         
         for i, point in enumerate(self.street_ends):
             if i % 1000 == 0:
-                print(f"Processed {i}/{len(self.street_ends)} points...")
+                self.logger.info(f"Processed {i}/{len(self.street_ends)} points...")
             
             distance = river_geom.distance(point) * 111000
             if distance < self.threshold_distance:
@@ -61,16 +63,16 @@ class StreetEndFinder:
                     self.near_water.append(point)
                     seen_coords.add(coord)
         
-        print("\nResults:")
-        print(f"Total street ends: {len(self.street_ends)}")
-        print(f"Unique street ends near water: {len(self.near_water)}")
-        print(f"Threshold distance: {self.threshold_distance} meters")
+        self.logger.info("\nResults:")
+        self.logger.info(f"Total street ends: {len(self.street_ends)}")
+        self.logger.info(f"Unique street ends near water: {len(self.near_water)}")
+        self.logger.info(f"Threshold distance: {self.threshold_distance} meters")
         
     def save_results(self, filename='street_ends_near_river.geojson'):
         """Save results to GeoJSON"""
         points_gdf = gpd.GeoDataFrame(geometry=self.near_water, crs="EPSG:4326")
         points_gdf.to_file(filename, driver='GeoJSON')
-        print(f"\nResults saved to {filename}")
+        self.logger.info(f"\nResults saved to {filename}")
         
     def process(self):
         """Run the complete analysis"""

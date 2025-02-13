@@ -10,22 +10,18 @@ import json
 from google_maps_export import GoogleMapsExporter
 import geopandas as gpd
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from utils.logging_config import setup_logger
 
 class GlobalCityAnalyzer:
     def __init__(self):
         self.output_dir = Path('global_analysis')
         self.output_dir.mkdir(exist_ok=True)
-        self.setup_logging()
+        self.logger = setup_logger('global_analyzer')
         self.maps_exporter = GoogleMapsExporter()
         self.analyzed_cities = []  # Add this to track cities
         
-    def setup_logging(self):
-        logging.basicConfig(
-            filename=self.output_dir / 'global_analysis.log',
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
-
     def get_top_cities(self):
         """Get list of top 1000 cities by population"""
         try:
@@ -70,7 +66,7 @@ class GlobalCityAnalyzer:
             city_dir = self.output_dir / city_row['country_code'] / city_row['name'].replace('/', '_')
             city_dir.mkdir(parents=True, exist_ok=True)
             
-            logging.info(f"Analyzing {city_name}")
+            self.logger.info(f"Analyzing {city_name}")
             
             # Find street ends
             finder = StreetEndFinder(city_name, threshold_distance=10)
@@ -78,7 +74,7 @@ class GlobalCityAnalyzer:
             
             # Skip if no water-adjacent street ends found
             if not near_water or len(near_water) == 0:
-                logging.info(f"Skipping {city_name}: No water-adjacent street ends found")
+                self.logger.info(f"Skipping {city_name}: No water-adjacent street ends found")
                 return None
             
             # Copy the GeoJSON file to city directory
@@ -115,27 +111,63 @@ class GlobalCityAnalyzer:
             return summary
             
         except Exception as e:
-            logging.error(f"Error analyzing {city_name}: {str(e)}")
+            self.logger.error(f"Error analyzing {city_name}: {str(e)}")
             return None
 
-    def run_global_analysis(self):
-        """Analyze all top cities"""
-        cities = self.get_top_cities()
+    def run_global_analysis(self, num_cities=1000, target_cities=None):
+        """Analyze all top cities using multiple threads"""
+        self.logger.info(f"Starting global analysis with {num_cities} cities")
+        
+        if target_cities is None:
+            cities = self.get_top_cities()
+            self.logger.info("Using top cities by population")
+        else:
+            cities = self.get_target_cities(target_cities)
+            self.logger.info(f"Using target cities: {target_cities}")
+
         if cities is None:
-            logging.error("Failed to get city list")
+            self.logger.error("Failed to get city list")
             return
         
         results = []
-        for _, city in tqdm(cities.iterrows(), total=len(cities), desc="Analyzing cities"):
-            result = self.analyze_city(city)
-            if result:
-                results.append(result)
-            
-            # Save progress after each city
-            with open(self.output_dir / 'global_results.json', 'w') as f:
-                json.dump(results, f, indent=2)
+        results_lock = threading.Lock()
         
-        # Generate final report
+        def analyze_and_save(city):
+            thread_logger = setup_logger(f'city_analyzer_{threading.get_ident()}')
+            try:
+                thread_logger.info(f"Starting analysis of {city['name']}")
+                result = self.analyze_city(city)
+                
+                if result:
+                    with results_lock:
+                        results.append(result)
+                        thread_logger.info(f"Saved results for {city['name']}")
+                        # Save progress after each city
+                        with open(self.output_dir / 'global_results.json', 'w') as f:
+                            json.dump(results, f, indent=2)
+                return result
+                
+            except Exception as e:
+                thread_logger.error(f"Analysis failed for {city['name']}: {str(e)}", 
+                                  exc_info=True)
+                return None
+        
+        self.logger.info(f"Initializing thread pool with {min(8, len(cities))} workers")
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_city = {executor.submit(analyze_and_save, city): city 
+                            for _, city in cities.iterrows()}
+            
+            for future in tqdm(as_completed(future_to_city), 
+                             total=len(future_to_city),
+                             desc="Analyzing cities"):
+                try:
+                    future.result()
+                except Exception as e:
+                    city = future_to_city[future]
+                    self.logger.error(f"City analysis failed for {city['name']}: {str(e)}", 
+                                    exc_info=True)
+        
+        self.logger.info(f"Analysis complete. Processed {len(results)} cities successfully")
         self.generate_report(results)
         
     def run_us_analysis(self, num_cities=20, target_cities=None):
@@ -173,7 +205,7 @@ class GlobalCityAnalyzer:
                 'total_cities_analyzed': int(len(results)),
                 'total_street_ends_found': int(df['total_street_ends'].sum()),
                 'average_street_ends_per_city': float(df['total_street_ends'].mean()),
-                'cities_by_street_ends': df.nlargest(10, 'total_street_ends')[['city_name', 'total_street_ends']].to_dict('records'),
+                'cities_by_street_ends': df[['city_name', 'total_street_ends']].sort_values('total_street_ends', ascending=False).to_dict('records'),
                 'analysis_date': time.strftime('%Y-%m-%d')
             }
             
@@ -291,5 +323,5 @@ if __name__ == "__main__":
     analyzer = GlobalCityAnalyzer()
     # Choose which analysis to run
     # analyzer.run_us_analysis(num_cities=20)  # For US cities only
-    # analyzer.run_global_analysis()  # For global analysis 
-    analyzer.run_us_analysis(target_cities=["Skokie"])
+    analyzer.run_global_analysis(num_cities=10)  # For global analysis 
+    # analyzer.run_us_analysis(target_cities=["Skokie"])

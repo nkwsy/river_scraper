@@ -4,11 +4,9 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 import requests
-import logging
+from utils.logging_config import setup_logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+logger = setup_logger(__name__)
 
 load_dotenv()
 

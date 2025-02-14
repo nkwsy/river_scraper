@@ -1,6 +1,8 @@
 #main.py
 
-import osmnx as ox
+from utils.osmnx_load import get_ox
+ox = get_ox()
+
 import geopandas as gpd
 from shapely.geometry import Point
 

@@ -1,7 +1,8 @@
 import folium
 import geopandas as gpd
-import osmnx as ox
 from utils.logging_config import setup_logger
+from utils.osmnx_load import get_ox
+ox = get_ox()
 from enrich_data import LocationEnricher
 import os
 

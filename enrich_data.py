@@ -4,10 +4,11 @@ import requests
 import pandas as pd
 import geopandas as gpd
 from shapely.geometry import Point, box
-import osmnx as ox
 from datetime import datetime
 from dotenv import load_dotenv
 from utils.logging_config import setup_logger
+from utils.osmnx_load import get_ox
+ox = get_ox()
 
 # Create logger for this module
 logger = setup_logger(__name__)

@@ -86,11 +86,14 @@ class GlobalCityAnalyzer:
             gdf.to_file(str(geojson_path), driver='GeoJSON')
             
             # Continue with rest of analysis
-            renderer = StreetEndRenderer(str(geojson_path), city_name)
-            renderer.render(str(city_dir / 'map.html'))
             
             enricher = LocationEnricher()
             results = enricher.process_locations(str(geojson_path))
+
+            # Continue with rest of analysis
+            renderer = StreetEndRenderer(str(geojson_path), city_name)
+            renderer.render(str(city_dir / 'map.html'))
+            
             
             summary = {
                 'city_name': city_name,
@@ -114,7 +117,7 @@ class GlobalCityAnalyzer:
             self.logger.error(f"Error analyzing {city_name}: {str(e)}")
             return None
 
-    def run_global_analysis(self, num_cities=1000, target_cities=None):
+    def run_global_analysis(self, num_cities=100, target_cities=None):
         """Analyze all top cities using multiple threads"""
         self.logger.info(f"Starting global analysis with {num_cities} cities")
         
@@ -275,7 +278,7 @@ class GlobalCityAnalyzer:
         rows = ""
         for city in cities_data:
             city_name = city['city_name'].split(',')[0].strip()
-            map_path = f"US/{city_name}/map.html"
+            map_path = f"{city['country_code']}/{city_name}/map.html"
             
             # Check if map exists
             if (self.output_dir / map_path).exists():
@@ -324,4 +327,4 @@ if __name__ == "__main__":
     # Choose which analysis to run
     # analyzer.run_us_analysis(num_cities=20)  # For US cities only
     # analyzer.run_global_analysis(num_cities=10)  # For global analysis 
-    analyzer.run_us_analysis(target_cities=["Skokie"])
+    analyzer.run_us_analysis(target_cities=["Skokie", "Vancouver"])

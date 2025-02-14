@@ -323,5 +323,5 @@ if __name__ == "__main__":
     analyzer = GlobalCityAnalyzer()
     # Choose which analysis to run
     # analyzer.run_us_analysis(num_cities=20)  # For US cities only
-    analyzer.run_global_analysis(num_cities=10)  # For global analysis 
-    # analyzer.run_us_analysis(target_cities=["Skokie"])
+    # analyzer.run_global_analysis(num_cities=10)  # For global analysis 
+    analyzer.run_us_analysis(target_cities=["Skokie"])

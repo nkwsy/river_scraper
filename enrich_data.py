@@ -152,23 +152,25 @@ class LocationEnricher:
         return None
 
     def calculate_desirability_score(self, data):
-        """Calculate a desirability score based on various factors"""
+        """Calculate a desirability score based on various factors, prioritizing high density with low greenspace"""
         score = 0
         weights = {
-            'median_income': 0.2,
-            'green_percentage': 0.3,
-            'proximity_to_water': 0.2,
-            'population_density': 0.15,
-            'num_parks': 0.15
+            'population_density': 0.7,  # Increased weight for density
+            'green_percentage': 0.3,    # Lower weight for greenspace, and we'll invert it
         }
         
         # Normalize and weight each factor
-        if 'median_income' in data:
-            score += (data['median_income'] / 100000) * weights['median_income']
-        if 'green_percentage' in data:
-            score += (data['green_percentage'] / 100) * weights['green_percentage']
-        if 'num_parks' in data:
-            score += min(data['num_parks'] / 10, 1) * weights['num_parks']
+        if 'population' in data and 'population_density' in data['population']:
+            # Normalize density (assuming 15000 people/km² as upper bound)
+            # Higher density = higher score
+            density_score = min(data['population']['population_density'] / 15000, 1)
+            score += density_score * weights['population_density']
+
+        if 'greenspace' in data and 'green_percentage' in data['greenspace']:
+            # Invert green percentage so less green = higher score
+            # 100% green = 0 score, 0% green = 1 score
+            green_score = 1 - (data['greenspace']['green_percentage'] / 100)
+            score += green_score * weights['green_percentage']
         
         return min(score * 100, 100)  # Return score out of 100
 
@@ -206,7 +208,6 @@ class LocationEnricher:
                 logger.info("No buildings found in area")
             
             # Estimate population density based on built-up percentage and OSM data
-            # This is more reliable than the WorldPop API query
             if built_up_percentage > 80:
                 population_density = 15000  # high density urban
                 density_category = "high density urban"
@@ -222,19 +223,22 @@ class LocationEnricher:
             
             logger.info(f"Estimated density category: {density_category}")
             
-            # Get additional context from OSM
-            context_tags = ox.features_from_point(
-                (lat, lon), 
-                tags={'place': True}, 
-                dist=1000
-            )
-            
+            # Try to get place context, but don't fail if not found
             place_type = 'unknown'
-            if len(context_tags) > 0:
-                place_types = context_tags['place'].dropna().unique()
-                if len(place_types) > 0:
-                    place_type = place_types[0]
-                    logger.info(f"Identified place type: {place_type}")
+            try:
+                context_tags = ox.features_from_point(
+                    (lat, lon), 
+                    tags={'place': True}, 
+                    dist=1000
+                )
+                
+                if len(context_tags) > 0:
+                    place_types = context_tags['place'].dropna().unique()
+                    if len(place_types) > 0:
+                        place_type = place_types[0]
+                        logger.info(f"Identified place type: {place_type}")
+            except Exception as e:
+                logger.warning(f"Could not determine place type: {str(e)}")
             
             return {
                 'population_density': round(population_density, 2),  # people per square km

@@ -7,13 +7,29 @@ from enrich_data import LocationEnricher
 import os
 
 class StreetEndRenderer:
-    def __init__(self, points_file, location):
+    """Creates interactive maps showing street ends near water features.
+    
+    Displays points on both street and satellite maps with popups containing
+    location data, images, and external map links.
+    """
+    
+    def __init__(self, points_file, location, **kwargs):
+        """
+        Args:
+            points_file (str): Path to GeoJSON with street end points
+            location (str): Location name (e.g., "Chicago, USA")
+            **kwargs:
+                threshold_distance (float): Distance in meters (default: 1000)
+                enrich_data (bool): Include enriched data (default: True)
+        """
         self.logger = setup_logger(__name__)
         self.points = gpd.read_file(points_file)
         self.location = location
         self.water_features = None
         self.map = None
         self.output_dir = os.path.abspath(os.getenv('OUTPUT_DIR', 'location_data'))
+        self.threshold_distance = kwargs.get('threshold_distance', 1000)
+        self.enrich_data = kwargs.get('enrich_data', True)
         
     def get_water_features(self):
         """Get water features for the location"""
@@ -57,7 +73,11 @@ class StreetEndRenderer:
         ).add_to(self.map)
         
     def add_points(self):
-        """Add street end points with enriched data popups"""
+        """Add street end points with popups containing:
+        - Street view images
+        - Location data (population, green space, water features)
+        - Google Maps links
+        """
         enricher = LocationEnricher()
         
         for idx, point in self.points.iterrows():
@@ -132,9 +152,6 @@ class StreetEndRenderer:
             # Add external links
             popup_html += f"""
                 <div style='margin-top: 10px;'>
-                    <a href="https://www.google.com/maps/@{lat},{lon},3a,75y,0h,90t/data=!3m6!1e1" 
-                       target="_blank" class="btn btn-sm btn-primary">
-                       Open in Street View</a>
                     <a href="https://www.google.com/maps/@{lat},{lon},100m/data=!3m1!1e3" 
                        target="_blank" class="btn btn-sm btn-secondary">
                        Open Aerial View</a>
@@ -186,5 +203,15 @@ class StreetEndRenderer:
 
 # Example usage:
 if __name__ == "__main__":
+    # Basic usage
     renderer = StreetEndRenderer('street_ends_near_river.geojson', "Chicago, USA")
-    renderer.render() 
+    renderer.render()
+
+    # Custom usage
+    # renderer = StreetEndRenderer(
+    #     points_file='my_points.geojson',
+    #     location="Seattle, USA",
+    #     threshold_distance=500,  # 500 meters
+    #     enrich_data=False  # Skip enrichment
+    # )
+    # renderer.render('seattle_map.html') 

@@ -156,7 +156,7 @@ class GlobalCityAnalyzer:
                 return None
         
         self.logger.info(f"Initializing thread pool with {min(8, len(cities))} workers")
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             future_to_city = {executor.submit(analyze_and_save, city): city 
                             for _, city in cities.iterrows()}
             

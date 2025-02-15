@@ -62,7 +62,13 @@ class StreetEndFinder:
             if distance < self.threshold_distance:
                 coord = (round(point.x, 6), round(point.y, 6))
                 if coord not in seen_coords:
-                    self.near_water.append(point)
+                    # Create a new Point with properties instead of adding attribute
+                    point_with_props = {
+                        'type': 'Feature',
+                        'geometry': point,
+                        'properties': {'distance_to_water': round(distance, 2)}
+                    }
+                    self.near_water.append(point_with_props)
                     seen_coords.add(coord)
         
         self.logger.info("\nResults:")
@@ -72,7 +78,11 @@ class StreetEndFinder:
         
     def save_results(self, filename='street_ends_near_river.geojson'):
         """Save results to GeoJSON"""
-        points_gdf = gpd.GeoDataFrame(geometry=self.near_water, crs="EPSG:4326")
+        # Create GeoDataFrame from features with properties
+        points_gdf = gpd.GeoDataFrame.from_features(
+            self.near_water,
+            crs="EPSG:4326"
+        )
         points_gdf.to_file(filename, driver='GeoJSON')
         self.logger.info(f"\nResults saved to {filename}")
         

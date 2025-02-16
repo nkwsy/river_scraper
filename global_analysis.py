@@ -43,7 +43,7 @@ class GlobalCityAnalyzer:
         self.enrich_data = kwargs.get('enrich_data', True)
         self.start_time = None
 
-    def get_top_cities(self):
+    def get_top_cities(self, num_cities=1000):
         """Get list of top 1000 cities by population"""
         try:
             # Using geonames API for city data
@@ -56,7 +56,7 @@ class GlobalCityAnalyzer:
             
             # Filter and sort by population
             cities = df[df['feature_class'] == 'P'].sort_values('population', ascending=False)
-            return cities.head(1000)
+            return cities.head(num_cities)
             
         except Exception as e:
             logging.error(f"Error getting city list: {str(e)}")
@@ -201,7 +201,7 @@ class GlobalCityAnalyzer:
         self.logger.info(f"Target cities: {target_cities if target_cities else 'Using top cities by population'}")
         
         if target_cities is None:
-            cities = self.get_top_cities()
+            cities = self.get_top_cities(num_cities)
         else:
             cities = self.get_target_cities(target_cities)
         
@@ -445,11 +445,16 @@ if __name__ == "__main__":
     #     num_cities=len(cities_to_run),
     #     target_cities=cities_to_run
     # )
+    analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
+    analyzer_stage1.run_global_analysis_stage1(
+        num_cities=250,
+        # target_cities=cities_to_run
+    )
 
     # Stage 2
-    analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True)
-    results = analyzer_stage2.run_global_analysis_stage2(
-        num_cities=len(cities_to_run),
-        target_cities=cities_to_run
-    )
-    analyzer_stage2.generate_report(results)
+    # analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True)
+    # results = analyzer_stage2.run_global_analysis_stage2(
+    #     num_cities=len(cities_to_run),
+    #     target_cities=cities_to_run
+    # )
+    # analyzer_stage2.generate_report(results)

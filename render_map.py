@@ -1,20 +1,51 @@
 import folium
 import geopandas as gpd
+import json
 from utils.logging_config import setup_logger
 from utils.osmnx_load import get_ox
 ox = get_ox()
-from enrich_data import LocationEnricher
 import os
 
 class StreetEndRenderer:
-    def __init__(self, points_file, location):
+    """Creates interactive maps showing street ends near water features.
+    
+    Displays points on both street and satellite maps with popups containing
+    location data, images, and external map links.
+    """
+    
+    def __init__(self, points_file, location, summary_file=None, **kwargs):
+        """
+        Args:
+            points_file (str): Path to GeoJSON with street end points (not used if summary_file provided)
+            location (str): Location name (e.g., "Chicago, USA")
+            summary_file (str): Path to summary.json with enriched data
+            **kwargs:
+                threshold_distance (float): Distance in meters (default: 1000)
+        """
         self.logger = setup_logger(__name__)
-        self.points = gpd.read_file(points_file)
         self.location = location
         self.water_features = None
         self.map = None
-        self.output_dir = os.path.abspath(os.getenv('OUTPUT_DIR', 'location_data'))
+        self.threshold_distance = kwargs.get('threshold_distance', 1000)
         
+        # Load summary data
+        if summary_file and os.path.exists(summary_file):
+            try:
+                with open(summary_file, 'r') as f:
+                    summary_data = json.load(f)
+                    self.logger.info(f"Loaded summary data from {summary_file}")
+                
+                # Use the summary data directly as it's already a FeatureCollection
+                self.points = gpd.GeoDataFrame.from_features(summary_data)
+                self.output_dir = os.path.dirname(os.path.abspath(summary_file))
+                
+            except Exception as e:
+                self.logger.error(f"Error loading summary data: {str(e)}", exc_info=True)
+                raise
+        else:
+            self.logger.error("No valid summary file provided")
+            raise ValueError("Summary file is required")
+
     def get_water_features(self):
         """Get water features for the location"""
         self.water_features = ox.features_from_place(self.location, tags={
@@ -57,92 +88,24 @@ class StreetEndRenderer:
         ).add_to(self.map)
         
     def add_points(self):
-        """Add street end points with enriched data popups"""
-        enricher = LocationEnricher()
-        
+        """Add street end points with popups using available data"""
         for idx, point in self.points.iterrows():
             lat, lon = point.geometry.y, point.geometry.x
+            properties = point.get('properties', {})
             
-            # Get enriched data for this location
-            enriched_data = enricher.enrich_location(lat, lon, idx)
+            # if isinstance(properties, str):
+                # try:
+                #     properties = json.loads(properties)
+                # except:
+                #     properties = {}
             
-            # Determine point color based on desirability score
-            if enriched_data and 'desirability_score' in enriched_data:
-                score = enriched_data['desirability_score']
-                if score > 75:
-                    color = 'darkgreen'
-                elif score > 50:
-                    color = 'green'
-                elif score > 25:
-                    color = 'orange'
-                else:
-                    color = 'red'
-            else:
-                color = 'gray'
+            # Determine point color based on desirability score or distance
+            color = self._get_point_color(properties)
             
-            # Create popup content
-            popup_html = f"""
-            <div style="max-width: 400px;">
-                <h4>Street End #{idx}</h4>
-            """
+            # Create popup content with available properties
+            popup_html = self._create_popup_html(idx, lat, lon, properties)
             
-            # Add street view image if available
-            if enriched_data and 'images' in enriched_data and 'streetview' in enriched_data['images']:
-                # Convert file:// URL to relative path
-                image_path = enriched_data['images']['streetview']
-                if image_path.startswith('file://'):
-                    image_path = os.path.relpath(
-                        image_path.replace('file://', ''),
-                        start=os.path.dirname(os.path.abspath(output_file))
-                    )
-                popup_html += f"""
-                <img src="{image_path}" 
-                     style="width: 100%; margin: 10px 0;">
-                """
-            
-            # Add enriched data details
-            if enriched_data:
-                popup_html += "<div style='margin: 10px 0;'>"
-                if 'desirability_score' in enriched_data:
-                    popup_html += f"<strong>Desirability Score:</strong> {enriched_data['desirability_score']:.1f}/100<br>"
-                
-                if 'population' in enriched_data:
-                    pop_data = enriched_data['population']
-                    popup_html += f"""
-                    <strong>Area Type:</strong> {pop_data.get('density_category', 'Unknown')}<br>
-                    <strong>Built-up Area:</strong> {pop_data.get('built_up_percentage', 0):.1f}%<br>
-                    <strong>Population Density:</strong> {pop_data.get('population_density', 0):.1f}/km²<br>
-                    """
-                
-                if 'greenspace' in enriched_data:
-                    green_data = enriched_data['greenspace']
-                    popup_html += f"""
-                    <strong>Green Space:</strong> {green_data.get('green_percentage', 0):.1f}%<br>
-                    <strong>Nearby Parks:</strong> {green_data.get('num_parks', 0)}<br>
-                    """
-                
-                if 'waterway' in enriched_data:
-                    water_data = enriched_data['waterway']
-                    popup_html += f"""
-                    <strong>Waterway:</strong> {water_data.get('type', 'Unknown')}<br>
-                    <strong>Name:</strong> {water_data.get('name', 'Unknown')}<br>
-                    """
-                popup_html += "</div>"
-            
-            # Add external links
-            popup_html += f"""
-                <div style='margin-top: 10px;'>
-                    <a href="https://www.google.com/maps/@{lat},{lon},3a,75y,0h,90t/data=!3m6!1e1" 
-                       target="_blank" class="btn btn-sm btn-primary">
-                       Open in Street View</a>
-                    <a href="https://www.google.com/maps/@{lat},{lon},100m/data=!3m1!1e3" 
-                       target="_blank" class="btn btn-sm btn-secondary">
-                       Open Aerial View</a>
-                </div>
-            </div>
-            """
-            
-            # Create the marker with the enriched popup
+            # Create the marker
             folium.CircleMarker(
                 location=[lat, lon],
                 radius=6,
@@ -153,27 +116,128 @@ class StreetEndRenderer:
                 weight=2
             ).add_to(self.map)
             
-            # Add a legend
-            if idx == 0:  # Only add legend once
-                legend_html = """
-                <div style="position: fixed; 
-                            bottom: 50px; right: 50px; 
-                            border:2px solid grey; z-index:9999; 
-                            background-color:white;
-                            padding: 10px;
-                            font-size: 14px;">
-                    <p><strong>Desirability Score</strong></p>
-                    <p>
-                        <i class="fa fa-circle" style="color:darkgreen"></i> Excellent (75-100)<br>
-                        <i class="fa fa-circle" style="color:green"></i> Good (50-75)<br>
-                        <i class="fa fa-circle" style="color:orange"></i> Fair (25-50)<br>
-                        <i class="fa fa-circle" style="color:red"></i> Poor (0-25)<br>
-                        <i class="fa fa-circle" style="color:gray"></i> No Data
-                    </p>
-                </div>
-                """
-                self.map.get_root().html.add_child(folium.Element(legend_html))
-            
+            # Add legend on first point
+            if idx == 0:
+                self._add_legend()
+
+    def _get_point_color(self, properties):
+        """Determine point color based on available metrics"""
+        if 'desirability_score' in properties:
+            score = properties['desirability_score']
+            if score > 75:
+                return 'darkgreen'
+            elif score > 50:
+                return 'green'
+            elif score > 25:
+                return 'orange'
+            return 'red'
+        elif 'distance_to_water' in properties:
+            # Fallback to distance-based coloring
+            distance = properties['distance_to_water']
+            if distance < 5:
+                return 'darkgreen'
+            elif distance < 10:
+                return 'green'
+            elif distance < 20:
+                return 'orange'
+            return 'red'
+        return 'gray'
+
+    def _create_popup_html(self, idx, lat, lon, properties):
+        """Create HTML content for popups with flexible property handling"""
+        popup_html = f"""
+        <div style="max-width: 400px;">
+            <h4>Street End #{idx}</h4>
+        """
+        
+        # Add distance to water if available
+        if 'distance_to_water' in properties:
+            popup_html += f"<strong>Distance to Water:</strong> {properties['distance_to_water']}m<br>"
+        
+        # Add enriched data if available
+        if 'population' in properties:
+            pop_data = properties['population']
+            popup_html += "<div style='margin: 10px 0;'>"
+            popup_html += f"<strong>Population Density:</strong> {pop_data.get('population_density', 0):.1f}/km²<br>"
+            popup_html += f"<strong>Building Count:</strong> {pop_data.get('building_count', 0)}<br>"
+            popup_html += "</div>"
+        
+        if 'greenspace' in properties:
+            green_data = properties['greenspace']
+            popup_html += "<div style='margin: 10px 0;'>"
+            popup_html += f"<strong>Green Space:</strong> {green_data.get('green_percentage', 0):.1f}%<br>"
+            popup_html += f"<strong>Parks:</strong> {green_data.get('park_count', 0)}<br>"
+            popup_html += "</div>"
+        
+        if 'waterway' in properties:
+            water_data = properties['waterway']
+            popup_html += "<div style='margin: 10px 0;'>"
+            popup_html += f"<strong>Waterway:</strong> {water_data.get('name', 'Unknown')}<br>"
+            popup_html += f"<strong>Type:</strong> {water_data.get('type', 'Unknown')}<br>"
+            popup_html += "</div>"
+        
+        if 'desirability_score' in properties:
+            popup_html += f"<strong>Desirability Score:</strong> {properties['desirability_score']:.1f}/100<br>"
+        
+        # Add images if available
+        if 'images' in properties and properties['images']:
+            for img_type, img_path in properties['images'].items():
+                if img_path:
+                    rel_path = os.path.relpath(img_path, start=self.output_dir)
+                    popup_html += f'<img src="{rel_path}" style="width: 100%; margin: 10px 0;">'
+        
+        # Always add external map link
+        popup_html += f"""
+            <div style='margin-top: 10px;'>
+                <a href="https://www.google.com/maps/@{lat},{lon},100m/data=!3m1!1e3" 
+                   target="_blank" class="btn btn-sm btn-secondary">
+                   Open in Google Maps</a>
+            </div>
+        </div>
+        """
+        return popup_html
+
+    def _add_legend(self):
+        """Add legend to the map based on available metrics"""
+        if any('desirability_score' in point.get('properties', {}) 
+               for _, point in self.points.iterrows()):
+            legend_html = """
+            <div style="position: fixed; 
+                        bottom: 50px; right: 50px; 
+                        border:2px solid grey; z-index:9999; 
+                        background-color:white;
+                        padding: 10px;
+                        font-size: 14px;">
+                <p><strong>Desirability Score</strong></p>
+                <p>
+                    <i class="fa fa-circle" style="color:darkgreen"></i> Excellent (75-100)<br>
+                    <i class="fa fa-circle" style="color:green"></i> Good (50-75)<br>
+                    <i class="fa fa-circle" style="color:orange"></i> Fair (25-50)<br>
+                    <i class="fa fa-circle" style="color:red"></i> Poor (0-25)<br>
+                    <i class="fa fa-circle" style="color:gray"></i> No Data
+                </p>
+            </div>
+            """
+        else:
+            legend_html = """
+            <div style="position: fixed; 
+                        bottom: 50px; right: 50px; 
+                        border:2px solid grey; z-index:9999; 
+                        background-color:white;
+                        padding: 10px;
+                        font-size: 14px;">
+                <p><strong>Distance to Water</strong></p>
+                <p>
+                    <i class="fa fa-circle" style="color:darkgreen"></i> < 5m<br>
+                    <i class="fa fa-circle" style="color:green"></i> 5-10m<br>
+                    <i class="fa fa-circle" style="color:orange"></i> 10-20m<br>
+                    <i class="fa fa-circle" style="color:red"></i> > 20m<br>
+                    <i class="fa fa-circle" style="color:gray"></i> Unknown
+                </p>
+            </div>
+            """
+        self.map.get_root().html.add_child(folium.Element(legend_html))
+
     def render(self, output_file='street_ends_map.html'):
         """Create and save the complete map"""
         self.get_water_features()
@@ -186,5 +250,15 @@ class StreetEndRenderer:
 
 # Example usage:
 if __name__ == "__main__":
+    # Basic usage
     renderer = StreetEndRenderer('street_ends_near_river.geojson', "Chicago, USA")
-    renderer.render() 
+    renderer.render()
+
+    # Custom usage
+    # renderer = StreetEndRenderer(
+    #     points_file='my_points.geojson',
+    #     location="Seattle, USA",
+    #     threshold_distance=500,  # 500 meters
+    #     enrich_data=False  # Skip enrichment
+    # )
+    # renderer.render('seattle_map.html') 

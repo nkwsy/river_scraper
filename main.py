@@ -11,14 +11,17 @@ from render_map import StreetEndRenderer
 from utils.logging_config import setup_logger
 
 class StreetEndFinder:
-    def __init__(self, location, threshold_distance=10):
+    def __init__(self, location, threshold_distance=10, **kwargs):
         self.logger = setup_logger(__name__)
+        self.geojson_file = kwargs.get('geojson_file', 'street_ends_near_river.geojson')
         self.location = location
         self.threshold_distance = threshold_distance
         self.water_features = None
         self.streets = None
         self.street_ends = []
         self.near_water = []
+        self.should_find_street_ends = kwargs.get('find_street_ends', True)
+        self.should_enrich_data = kwargs.get('enrich_data', True)
         
     def get_data(self):
         """Download street and water data"""
@@ -62,7 +65,13 @@ class StreetEndFinder:
             if distance < self.threshold_distance:
                 coord = (round(point.x, 6), round(point.y, 6))
                 if coord not in seen_coords:
-                    self.near_water.append(point)
+                    # Create a new Point with properties instead of adding attribute
+                    point_with_props = {
+                        'type': 'Feature',
+                        'geometry': point,
+                        'properties': {'distance_to_water': round(distance, 2)}
+                    }
+                    self.near_water.append(point_with_props)
                     seen_coords.add(coord)
         
         self.logger.info("\nResults:")
@@ -70,17 +79,25 @@ class StreetEndFinder:
         self.logger.info(f"Unique street ends near water: {len(self.near_water)}")
         self.logger.info(f"Threshold distance: {self.threshold_distance} meters")
         
-    def save_results(self, filename='street_ends_near_river.geojson'):
+    def save_results(self, filename=None):
         """Save results to GeoJSON"""
-        points_gdf = gpd.GeoDataFrame(geometry=self.near_water, crs="EPSG:4326")
+        if filename is None:
+            filename = self.geojson_file
+        # Create GeoDataFrame from features with properties
+        points_gdf = gpd.GeoDataFrame.from_features(
+            self.near_water,
+            crs="EPSG:4326"
+        )
         points_gdf.to_file(filename, driver='GeoJSON')
         self.logger.info(f"\nResults saved to {filename}")
         
     def process(self):
         """Run the complete analysis"""
         self.get_data()
-        self.find_street_ends()
-        self.find_near_water()
+        if self.should_find_street_ends:
+            self.find_street_ends()
+        if self.should_enrich_data:
+            self.find_near_water()
         self.save_results()
         return self.water_features, self.near_water
 
@@ -93,11 +110,12 @@ if __name__ == "__main__":
         finder = StreetEndFinder(city, threshold_distance=10)
         finder.process()
         
+        # enrich data
+        enricher = LocationEnricher()
+        enricher.process_locations('street_ends_near_river.geojson')
         # Render the results
         output_file = f"street_ends_{city.split(',')[0].lower()}.html"
         renderer = StreetEndRenderer('street_ends_near_river.geojson', city)
         renderer.render(output_file)
 
-        # enrich data
-        enricher = LocationEnricher()
-        enricher.process_locations('street_ends_near_river.geojson')
+

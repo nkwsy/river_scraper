@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from main import StreetEndFinder
 from render_map import StreetEndRenderer
-from enrich_data import LocationEnricher
+from enrich_data import LocationEnricher, LocationConfig
 import json
 from google_maps_export import GoogleMapsExporter
 import geopandas as gpd
@@ -13,16 +13,37 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from utils.logging_config import setup_logger
+from datetime import datetime
+from functools import wraps
+from typing import Callable
+import asyncio
+
+def log_timing(func: Callable) -> Callable:
+    """Decorator to log function execution time"""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        start_time = time.time()
+        self.logger.info(f"Starting {func.__name__}")
+        
+        result = func(self, *args, **kwargs)
+        
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"Completed {func.__name__} in {elapsed_time:.2f} seconds")
+        return result
+    return wrapper
 
 class GlobalCityAnalyzer:
-    def __init__(self):
+    def __init__(self, **kwargs):
         self.output_dir = Path('global_analysis')
         self.output_dir.mkdir(exist_ok=True)
         self.logger = setup_logger('global_analyzer')
         self.maps_exporter = GoogleMapsExporter()
         self.analyzed_cities = []  # Add this to track cities
-        
-    def get_top_cities(self):
+        self.find_street_ends = kwargs.get('find_street_ends', True)
+        self.enrich_data = kwargs.get('enrich_data', True)
+        self.start_time = None
+
+    def get_top_cities(self, num_cities=1000):
         """Get list of top 1000 cities by population"""
         try:
             # Using geonames API for city data
@@ -35,7 +56,7 @@ class GlobalCityAnalyzer:
             
             # Filter and sort by population
             cities = df[df['feature_class'] == 'P'].sort_values('population', ascending=False)
-            return cities.head(1000)
+            return cities.head(num_cities)
             
         except Exception as e:
             logging.error(f"Error getting city list: {str(e)}")
@@ -59,66 +80,179 @@ class GlobalCityAnalyzer:
             logging.error(f"Error getting US city list: {str(e)}")
             return None
 
-    def analyze_city(self, city_row):
-        """Analyze a single city"""
+    @log_timing
+    def analyze_city_stage1(self, city_row):
+        """
+        Stage 1: Only generate the raw street ends near water for this city.
+        No enrichment is done here.
+        """
         try:
             city_name = f"{city_row['name']}, {city_row['country_code']}"
+            self.logger.info(f"Processing {city_name}")
+            
             city_dir = self.output_dir / city_row['country_code'] / city_row['name'].replace('/', '_')
             city_dir.mkdir(parents=True, exist_ok=True)
-            
-            self.logger.info(f"Analyzing {city_name}")
-            
-            # Find street ends
-            finder = StreetEndFinder(city_name, threshold_distance=10)
-            water_features, near_water = finder.process()  # This saves to street_ends_near_river.geojson
-            
-            # Skip if no water-adjacent street ends found
-            if not near_water or len(near_water) == 0:
-                self.logger.info(f"Skipping {city_name}: No water-adjacent street ends found")
-                return None
-            
-            # Copy the GeoJSON file to city directory
-            source_geojson = 'street_ends_near_river.geojson'
+
+            # Path for the output file
             geojson_path = city_dir / 'street_ends.geojson'
             
-            # Read and save to new location
-            gdf = gpd.read_file(source_geojson)
-            gdf.to_file(str(geojson_path), driver='GeoJSON')
-            
-            # Continue with rest of analysis
-            
-            enricher = LocationEnricher()
-            results = enricher.process_locations(str(geojson_path))
+            if self.find_street_ends:
+                self.logger.info(f"Finding street ends for {city_name}")
+                start = time.time()
+                finder = StreetEndFinder(city_name, threshold_distance=10, geojson_file=geojson_path)
+                water_features, near_water = finder.process()
+                self.logger.info(f"Found {len(near_water) if near_water else 0} street ends in {time.time() - start:.2f} seconds")
+                
+                if not near_water or len(near_water) == 0:
+                    self.logger.warning(f"No water-adjacent street ends found for {city_name}")
+                    return None
 
-            # Continue with rest of analysis
-            renderer = StreetEndRenderer(str(geojson_path), city_name)
-            renderer.render(str(city_dir / 'map.html'))
+            self.logger.info(f"Stage 1 complete for {city_name}")
+            return {"city_name": city_name, "stage1_geojson": str(geojson_path)}
+        
+        except Exception as e:
+            self.logger.error(f"Error in Stage 1 for {city_name}: {str(e)}", exc_info=True)
+            return None
+
+    @log_timing
+    async def analyze_city_stage2_async(self, city_row):
+        """Async version of analyze_city_stage2"""
+        try:
+            city_name = f"{city_row['name']}, {city_row['country_code']}"
+            self.logger.info(f"Starting enrichment for {city_name}")
             
+            city_dir = self.output_dir / city_row['country_code'] / city_row['name'].replace('/', '_')
+            geojson_path = city_dir / 'street_ends.geojson'
             
+            if not geojson_path.exists():
+                self.logger.warning(f"Cannot enrich {city_name}, missing {geojson_path}")
+                return None
+
+            if self.enrich_data:
+                self.logger.info(f"Enriching data for {city_name}")
+                start = time.time()
+                config = LocationConfig(
+                    radius_km=1.0,
+                    output_dir=city_dir,
+                    max_locations=-1,
+                    save_images=True,
+                    save_detailed_json=True
+                )
+                enricher = LocationEnricher(config)
+                results = await enricher.process_locations(str(geojson_path))
+                await enricher.cleanup()
+                self.logger.info(f"Enrichment completed in {time.time() - start:.2f} seconds")
+            else:
+                results = []
+
+            # Render map
+            self.logger.info(f"Rendering map for {city_name}")
+            start = time.time()
+            renderer = StreetEndRenderer(
+                str(geojson_path),
+                city_name,
+                summary_file=str(city_dir / 'summary.json')
+            )
+            map_html = city_dir / 'map.html'
+            renderer.render(str(map_html))
+            self.logger.info(f"Map rendering completed in {time.time() - start:.2f} seconds")
+
+            # Save summary as GeoJSON FeatureCollection with city metadata as properties
             summary = {
-                'city_name': city_name,
-                'population': city_row['population'],
-                'latitude': city_row['latitude'],
-                'longitude': city_row['longitude'],
-                'total_street_ends': len(near_water),
-                'analysis_date': time.strftime('%Y-%m-%d'),
-                'enrichment_results': results
+                'type': 'FeatureCollection',
+                'name': 'street_ends',
+                'properties': {
+                    'city_name': city_name,
+                    'population': city_row['population'],
+                    'latitude': city_row['latitude'],
+                    'longitude': city_row['longitude'],
+                    'total_street_ends': len(results['features']) if isinstance(results, dict) else 0,
+                    'analysis_date': datetime.now().isoformat()
+                },
+                'crs': {
+                    'type': 'name',
+                    'properties': {
+                        'name': 'urn:ogc:def:crs:OGC:1.3:CRS84'
+                    }
+                },
+                'features': results['features'] if isinstance(results, dict) else []
             }
             
             with open(city_dir / 'summary.json', 'w') as f:
                 json.dump(summary, f, indent=2)
-                
-            # Add city to analyzed list
+
             self.analyzed_cities.append(city_name)
-            
+            self.logger.info(f"Stage 2 complete for {city_name}")
             return summary
-            
+
         except Exception as e:
-            self.logger.error(f"Error analyzing {city_name}: {str(e)}")
+            self.logger.error(f"Error in Stage 2 for {city_name}: {str(e)}", exc_info=True)
             return None
 
+    @log_timing
+    def run_global_analysis_stage1(self, num_cities=10, target_cities=None):
+        """
+        Runs only Stage 1 for multiple cities:
+        1) Get top cities or user-specified target cities
+        2) For each city, generate street_ends.geojson
+        """
+        self.start_time = time.time()
+        self.logger.info(f"Starting Global Analysis Stage 1 with {num_cities} cities")
+        self.logger.info(f"Target cities: {target_cities if target_cities else 'Using top cities by population'}")
+        
+        if target_cities is None:
+            cities = self.get_top_cities(num_cities)
+        else:
+            cities = self.get_target_cities(target_cities)
+        
+        if cities is None:
+            self.logger.error("Failed to get city list for Stage 1")
+            return
+
+        results = []
+        for _, city in tqdm(cities.head(num_cities).iterrows(), total=len(cities.head(num_cities)), desc="Stage 1"):
+            res = self.analyze_city_stage1(city)
+            if res:
+                results.append(res)
+
+        # Save partial results if you want
+        with open(self.output_dir / 'stage1_results.json', 'w') as f:
+            json.dump(results, f, indent=2)
+
+    @log_timing
+    async def run_global_analysis_stage2_async(self, num_cities=10, target_cities=None):
+        """Async version of run_global_analysis_stage2"""
+        self.start_time = time.time()
+        self.logger.info(f"Starting Global Analysis Stage 2 with {num_cities} cities")
+        self.logger.info(f"Target cities: {target_cities if target_cities else 'Using top cities by population'}")
+        
+        if target_cities is None:
+            cities = self.get_top_cities()
+        else:
+            cities = self.get_target_cities(target_cities)
+        
+        if cities is None:
+            self.logger.error("Failed to get city list for Stage 2")
+            return
+
+        tasks = []
+        for _, city in cities.head(num_cities).iterrows():
+            tasks.append(self.analyze_city_stage2_async(city))
+
+        results = await asyncio.gather(*tasks)
+        results = [r for r in results if r is not None]
+
+        # Save final results
+        with open(self.output_dir / 'stage2_results.json', 'w') as f:
+            json.dump(results, f, indent=2)
+        return results
+
+    def run_global_analysis_stage2(self, num_cities=10, target_cities=None):
+        """Synchronous wrapper for run_global_analysis_stage2_async"""
+        return asyncio.run(self.run_global_analysis_stage2_async(num_cities, target_cities))
+
     def run_global_analysis(self, num_cities=100, target_cities=None):
-        """Analyze all top cities using multiple threads"""
+        """Analyze all top cities sequentially"""
         self.logger.info(f"Starting global analysis with {num_cities} cities")
         
         if target_cities is None:
@@ -133,42 +267,22 @@ class GlobalCityAnalyzer:
             return
         
         results = []
-        results_lock = threading.Lock()
         
-        def analyze_and_save(city):
-            thread_logger = setup_logger(f'city_analyzer_{threading.get_ident()}')
+        for _, city in tqdm(cities.iterrows(), total=len(cities), desc="Analyzing cities"):
             try:
-                thread_logger.info(f"Starting analysis of {city['name']}")
                 result = self.analyze_city(city)
                 
                 if result:
-                    with results_lock:
-                        results.append(result)
-                        thread_logger.info(f"Saved results for {city['name']}")
-                        # Save progress after each city
-                        with open(self.output_dir / 'global_results.json', 'w') as f:
-                            json.dump(results, f, indent=2)
-                return result
-                
+                    results.append(result)
+                    self.logger.info(f"Saved results for {city['name']}")
+                    # Save progress after each city
+                    with open(self.output_dir / 'global_results.json', 'w') as f:
+                        json.dump(results, f, indent=2)
+                        
             except Exception as e:
-                thread_logger.error(f"Analysis failed for {city['name']}: {str(e)}", 
-                                  exc_info=True)
-                return None
-        
-        self.logger.info(f"Initializing thread pool with {min(8, len(cities))} workers")
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_city = {executor.submit(analyze_and_save, city): city 
-                            for _, city in cities.iterrows()}
-            
-            for future in tqdm(as_completed(future_to_city), 
-                             total=len(future_to_city),
-                             desc="Analyzing cities"):
-                try:
-                    future.result()
-                except Exception as e:
-                    city = future_to_city[future]
-                    self.logger.error(f"City analysis failed for {city['name']}: {str(e)}", 
-                                    exc_info=True)
+                self.logger.error(f"Analysis failed for {city['name']}: {str(e)}", 
+                              exc_info=True)
+                continue
         
         self.logger.info(f"Analysis complete. Processed {len(results)} cities successfully")
         self.generate_report(results)
@@ -278,7 +392,7 @@ class GlobalCityAnalyzer:
         rows = ""
         for city in cities_data:
             city_name = city['city_name'].split(',')[0].strip()
-            map_path = f"{city['country_code']}/{city_name}/map.html"
+            map_path = f"{city['city_name'].split(',')[1].strip()}/{city_name}/map.html"
             
             # Check if map exists
             if (self.output_dir / map_path).exists():
@@ -323,8 +437,24 @@ class GlobalCityAnalyzer:
             return None
 
 if __name__ == "__main__":
-    analyzer = GlobalCityAnalyzer()
-    # Choose which analysis to run
-    # analyzer.run_us_analysis(num_cities=20)  # For US cities only
-    # analyzer.run_global_analysis(num_cities=10)  # For global analysis 
-    analyzer.run_us_analysis(target_cities=["Skokie", "Vancouver"])
+    cities_to_run = ["Skokie", "Lagrange", "Wilmington"]
+
+    # Stage 1
+    # analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
+    # analyzer_stage1.run_global_analysis_stage1(
+    #     num_cities=len(cities_to_run),
+    #     target_cities=cities_to_run
+    # )
+    analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
+    analyzer_stage1.run_global_analysis_stage1(
+        num_cities=250,
+        # target_cities=cities_to_run
+    )
+
+    # Stage 2
+    # analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True)
+    # results = analyzer_stage2.run_global_analysis_stage2(
+    #     num_cities=len(cities_to_run),
+    #     target_cities=cities_to_run
+    # )
+    # analyzer_stage2.generate_report(results)

@@ -436,25 +436,178 @@ class GlobalCityAnalyzer:
             logging.error(f"Error getting target cities: {str(e)}")
             return None
 
+    @log_timing
+    def run_global_analysis_stage3(self, results_dir=None):
+        """
+        Stage 3: Generate comprehensive reports from completed analyses
+        Combines all city summaries and generates global statistics and visualizations
+        """
+        if results_dir is None:
+            results_dir = self.output_dir
+        
+        self.logger.info(f"Starting Global Analysis Stage 3 - Report Generation")
+        
+        try:
+            # Collect all summary files
+            summaries = []
+            for country_dir in Path(results_dir).glob('*'):
+                if not country_dir.is_dir():
+                    continue
+                    
+                for city_dir in country_dir.glob('*'):
+                    summary_file = city_dir / 'summary.json'
+                    if summary_file.exists():
+                        try:
+                            with open(summary_file) as f:
+                                summary = json.load(f)
+                                if not all(key in summary for key in ['type', 'properties', 'features']):
+                                    self.logger.warning(f"Invalid summary structure in {summary_file}")
+                                    continue
+                                if not all(key in summary['properties'] for key in ['city_name', 'population', 'total_street_ends']):
+                                    self.logger.warning(f"Missing required properties in {summary_file}")
+                                    continue
+                                if not summary['features']:
+                                    self.logger.warning(f"No features found in {summary_file}")
+                                    continue
+                                summaries.append(summary)
+                                self.analyzed_cities.append(summary['properties']['city_name'])
+                        except Exception as e:
+                            self.logger.error(f"Error reading {summary_file}: {str(e)}")
+            
+            if not summaries:
+                self.logger.error("No summary files found to generate report")
+                return
+            
+            # Convert summaries to DataFrame for analysis
+            df = pd.DataFrame([{
+                'city_name': s['properties']['city_name'],
+                'population': s['properties']['population'],
+                'total_street_ends': s['properties']['total_street_ends'],
+                'latitude': s['properties']['latitude'],
+                'longitude': s['properties']['longitude'],
+                'analysis_date': s['properties']['analysis_date'],
+                'features': len(s['features'])
+            } for s in summaries])
+            
+            # Generate statistics
+            stats = {
+                'total_cities_analyzed': int(len(summaries)),
+                'total_street_ends_found': int(df['total_street_ends'].sum()),
+                'average_street_ends_per_city': float(df['total_street_ends'].mean()),
+                'cities_by_street_ends': df[['city_name', 'total_street_ends']].sort_values('total_street_ends', ascending=False).to_dict('records'),
+                'analysis_date': datetime.now().isoformat()
+            }
+            
+            # Save statistics
+            with open(results_dir / 'global_statistics.json', 'w') as f:
+                json.dump(stats, f, indent=2)
+            
+            # Generate map link
+            map_link = self.maps_exporter.export_cities(self.analyzed_cities)
+            
+            # Generate HTML report
+            html_report = f"""
+            <html>
+                <head>
+                    <title>Global Street Ends Analysis</title>
+                    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+                </head>
+                <body>
+                    <div class="container mt-5">
+                        <h1>Global Street Ends Analysis</h1>
+                        <p>Analysis Date: {stats['analysis_date']}</p>
+                        <p><a href="{map_link}" target="_blank">View All Street Ends on Google Maps</a></p>
+                        
+                        <h2>Summary Statistics</h2>
+                        <ul>
+                            <li>Total Cities Analyzed: {stats['total_cities_analyzed']}</li>
+                            <li>Total Street Ends Found: {stats['total_street_ends_found']}</li>
+                            <li>Average Street Ends per City: {stats['average_street_ends_per_city']:.2f}</li>
+                        </ul>
+                        
+                        <h2>Top Cities by Street Ends</h2>
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>City</th>
+                                    <th>Street Ends</th>
+                                    <th>Population</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {self._generate_table_rows(df)}
+                            </tbody>
+                        </table>
+                    </div>
+                </body>
+            </html>
+            """
+            
+            with open(results_dir / 'global_report.html', 'w') as f:
+                f.write(html_report)
+                
+            self.logger.info(f"Stage 3 complete - Report generated at {results_dir / 'global_report.html'}")
+            
+        except Exception as e:
+            self.logger.error(f"Error in Stage 3: {str(e)}", exc_info=True)
+
+    def _generate_table_rows(self, df: pd.DataFrame) -> str:
+        """Generate HTML table rows from DataFrame"""
+        rows = ""
+        for _, row in df.iterrows():
+            city_name = row['city_name']
+            country_code = city_name.split(',')[1].strip()
+            city = city_name.split(',')[0].strip()
+            map_path = f"{country_code}/{city}/map.html"
+            
+            # Check if map exists
+            if (self.output_dir / map_path).exists():
+                rows += f"""
+                    <tr>
+                        <td>{city_name}</td>
+                        <td>{row['total_street_ends']}</td>
+                        <td>{row['population']:,}</td>
+                        <td>
+                            <a href="{map_path}" target="_blank" class="btn btn-sm btn-primary">View Map</a>
+                        </td>
+                    </tr>
+                """
+            else:
+                rows += f"""
+                    <tr>
+                        <td>{city_name}</td>
+                        <td>{row['total_street_ends']}</td>
+                        <td>{row['population']:,}</td>
+                        <td>No map available</td>
+                    </tr>
+                """
+        return rows
+
 if __name__ == "__main__":
-    cities_to_run = ["Skokie", "Lagrange", "Wilmington"]
+    cities_to_run = ["Skokie", "Chicago", "Toronto"]
 
     # Stage 1
     # analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
     # analyzer_stage1.run_global_analysis_stage1(
-    #     num_cities=len(cities_to_run),
+    #     # num_cities=len(cities_to_run),
     #     target_cities=cities_to_run
     # )
-    analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
-    analyzer_stage1.run_global_analysis_stage1(
+
+    # analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
+    # analyzer_stage1.run_global_analysis_stage1(
+    #     num_cities=250,
+    #     # target_cities=cities_to_run
+    # )
+
+    # Stage 2
+    analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True)
+    results = analyzer_stage2.run_global_analysis_stage2(
         num_cities=250,
         # target_cities=cities_to_run
     )
+    analyzer_stage2.generate_report(results)
 
-    # Stage 2
-    # analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True)
-    # results = analyzer_stage2.run_global_analysis_stage2(
-    #     num_cities=len(cities_to_run),
-    #     target_cities=cities_to_run
-    # )
-    # analyzer_stage2.generate_report(results)
+    # Stage 3: Generate report
+    analyzer_stage3 = GlobalCityAnalyzer()
+    analyzer_stage3.run_global_analysis_stage3()

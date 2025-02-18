@@ -114,7 +114,7 @@ class LocationEnricher:
             'avg_building_density': round(avg_density, 2)
         }
 
-    def calculate_greenspace_score(self, green_areas: gpd.GeoDataFrame) -> Dict:
+    def calculate_greenspace_score(self, green_areas: gpd.GeoDataFrame, buffer_area: float) -> Dict:
         """Calculate greenspace score from nearby areas"""
         try:
             # Ensure we have the required columns, with safe defaults
@@ -126,11 +126,39 @@ class LocationEnricher:
                 self.logger.warning("No 'landuse' column found in green_areas, adding empty column")
                 green_areas['landuse'] = None
 
-            # Calculate scores with safe filtering
-            parks = green_areas[green_areas['leisure'].fillna('').str.lower() == 'park']
-            nature_reserves = green_areas[green_areas['leisure'].fillna('').str.lower() == 'nature_reserve']
-            gardens = green_areas[green_areas['leisure'].fillna('').str.lower() == 'garden']
-            green_spaces = green_areas[green_areas['landuse'].fillna('').str.lower().isin(['grass', 'recreation_ground'])]
+            # Filter for specific green space types
+            parks = green_areas[green_areas['leisure'].fillna(0).str.lower() == 'park']
+            nature_reserves = green_areas[green_areas['leisure'].fillna(0).str.lower() == 'nature_reserve']
+            gardens = green_areas[green_areas['leisure'].fillna(0).str.lower() == 'garden']
+            
+            # Calculate total area of specific green spaces only
+            total_green_area = (
+                parks.geometry.area.sum() +
+                nature_reserves.geometry.area.sum() +
+                gardens.geometry.area.sum()
+            )
+            green_percentage = (total_green_area / buffer_area) * 100  # Convert to percentage
+
+            # Calculate average distance to nearest park (in meters)
+            # Buffer radius is typically 1km = 1000m
+            if not parks.empty:
+                # Convert to projected CRS for accurate distance calculation
+                parks_proj = parks.to_crs('EPSG:3857')
+                center_point = Point(0, 0)  # Buffer is centered at 0,0
+                center_gdf = gpd.GeoDataFrame(geometry=[center_point], crs='EPSG:4326').to_crs('EPSG:3857')
+                distances = parks_proj.geometry.distance(center_gdf.geometry.iloc[0])
+                nearest_park_distance = distances.min()
+                
+                # Score based on walking distance (higher score for closer parks)
+                # Assumes 5 minutes walking = ~400m
+                # Max score (100) for parks within 400m
+                # Min score (0) for parks at or beyond 1000m
+                distance_score = max(0, min(100, (1000 - nearest_park_distance) / 6))
+            else:
+                distance_score = 0
+
+            # Additional filtering for other counts
+            green_spaces = green_areas[green_areas['landuse'].fillna(0).str.lower().isin(['grass', 'recreation_ground'])]
 
             return {
                 'park_count': len(parks),
@@ -138,10 +166,10 @@ class LocationEnricher:
                 'garden_count': len(gardens),
                 'green_space_count': len(green_spaces),
                 'total_green_areas': len(green_areas),
-                'greenspace_score': (len(parks) * 2 + 
-                                   len(nature_reserves) * 3 + 
-                                   len(gardens) * 1.5 + 
-                                   len(green_spaces)) / max(1, len(green_areas))
+                'green_percentage': round(green_percentage, 2),
+                'nearest_park_distance': round(nearest_park_distance if 'nearest_park_distance' in locals() else -1, 2),
+                'park_distance_score': round(distance_score, 2),
+                'greenspace_score': round((green_percentage + distance_score) / 2, 2)  # Combined score
             }
         except Exception as e:
             self.logger.error(f"Error calculating greenspace score: {str(e)}")
@@ -303,7 +331,8 @@ class LocationEnricher:
         )
         
         greenspace_score = self.calculate_greenspace_score(
-            osm_data['green_areas']
+            osm_data['green_areas'],
+            osm_data['buffer_area']
         )
         
         self.logger.info(f"Metrics calculated in {time.time() - metrics_start:.2f} seconds")

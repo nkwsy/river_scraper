@@ -37,6 +37,7 @@ class StreetEndRenderer:
                 
                 # Use the summary data directly as it's already a FeatureCollection
                 self.points = gpd.GeoDataFrame.from_features(summary_data)
+                # self.points = summary_data
                 self.output_dir = os.path.dirname(os.path.abspath(summary_file))
                 
             except Exception as e:
@@ -100,10 +101,10 @@ class StreetEndRenderer:
                 #     properties = {}
             
             # Determine point color based on desirability score or distance
-            color = self._get_point_color(properties)
+            color = self._get_point_color(idx, point)
             
             # Create popup content with available properties
-            popup_html = self._create_popup_html(idx, lat, lon, properties)
+            popup_html = self._create_popup_html(idx, point)
             
             # Create the marker
             folium.CircleMarker(
@@ -120,14 +121,15 @@ class StreetEndRenderer:
             if idx == 0:
                 self._add_legend()
 
-    def _get_point_color(self, properties):
+    def _get_point_color(self, idx, point):
         """Determine point color based on available metrics"""
+        properties = point
         if 'desirability_score' in properties:
             score = properties['desirability_score']
             if score > 75:
-                return 'darkgreen'
+                return 'yellowgreen'
             elif score > 50:
-                return 'green'
+                return 'yellow'
             elif score > 25:
                 return 'orange'
             return 'red'
@@ -143,8 +145,9 @@ class StreetEndRenderer:
             return 'red'
         return 'gray'
 
-    def _create_popup_html(self, idx, lat, lon, properties):
+    def _create_popup_html(self, idx, point):
         """Create HTML content for popups with flexible property handling"""
+        properties = point
         popup_html = f"""
         <div style="max-width: 400px;">
             <h4>Street End #{idx}</h4>
@@ -167,6 +170,8 @@ class StreetEndRenderer:
             popup_html += "<div style='margin: 10px 0;'>"
             popup_html += f"<strong>Green Space:</strong> {green_data.get('green_percentage', 0):.1f}%<br>"
             popup_html += f"<strong>Parks:</strong> {green_data.get('park_count', 0)}<br>"
+            popup_html += f"<strong>Distance to Nearest Park:</strong> {green_data.get('nearest_park_distance', -1):.0f}m<br>"
+            popup_html += f"<strong>Park Access Score:</strong> {green_data.get('park_distance_score', 0):.1f}/100<br>"
             popup_html += "</div>"
         
         if 'waterway' in properties:
@@ -189,7 +194,7 @@ class StreetEndRenderer:
         # Always add external map link
         popup_html += f"""
             <div style='margin-top: 10px;'>
-                <a href="https://www.google.com/maps/@{lat},{lon},100m/data=!3m1!1e3" 
+                <a href="https://www.google.com/maps/@{point.geometry.y},{point.geometry.x},100m/data=!3m1!1e3" 
                    target="_blank" class="btn btn-sm btn-secondary">
                    Open in Google Maps</a>
             </div>
@@ -210,8 +215,8 @@ class StreetEndRenderer:
                         font-size: 14px;">
                 <p><strong>Desirability Score</strong></p>
                 <p>
-                    <i class="fa fa-circle" style="color:darkgreen"></i> Excellent (75-100)<br>
-                    <i class="fa fa-circle" style="color:green"></i> Good (50-75)<br>
+                    <i class="fa fa-circle" style="color:yellowgreen"></i> Excellent (75-100)<br>
+                    <i class="fa fa-circle" style="color:yellow"></i> Good (50-75)<br>
                     <i class="fa fa-circle" style="color:orange"></i> Fair (25-50)<br>
                     <i class="fa fa-circle" style="color:red"></i> Poor (0-25)<br>
                     <i class="fa fa-circle" style="color:gray"></i> No Data
@@ -226,12 +231,12 @@ class StreetEndRenderer:
                         background-color:white;
                         padding: 10px;
                         font-size: 14px;">
-                <p><strong>Distance to Water</strong></p>
+                <p><strong>Applicability Score</strong></p>
                 <p>
-                    <i class="fa fa-circle" style="color:darkgreen"></i> < 5m<br>
-                    <i class="fa fa-circle" style="color:green"></i> 5-10m<br>
-                    <i class="fa fa-circle" style="color:orange"></i> 10-20m<br>
-                    <i class="fa fa-circle" style="color:red"></i> > 20m<br>
+                    <i class="fa fa-circle" style="color:yellowgreen"></i> < 75%<br>
+                    <i class="fa fa-circle" style="color:yellow"></i> 75-50%<br>
+                    <i class="fa fa-circle" style="color:orange"></i> 50-25%<br>
+                    <i class="fa fa-circle" style="color:red"></i> < 25%<br>
                     <i class="fa fa-circle" style="color:gray"></i> Unknown
                 </p>
             </div>

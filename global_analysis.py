@@ -128,13 +128,13 @@ class GlobalCityAnalyzer:
             
             city_dir = self.output_dir / city_row['country_code'] / city_row['name'].replace('/', '_')
             geojson_path = city_dir / 'street_ends.geojson'
-            summary_file=str(city_dir / 'summary.json')
+            summary_path = city_dir / 'summary.json'
             skip_enrichment = False
 
             if not geojson_path.exists():
                 self.logger.warning(f"Cannot enrich {city_name}, missing {geojson_path}")
                 return None
-            if summary_file.exists() and not self.update_existing:
+            if summary_path.exists() and not self.update_existing:
                 skip_enrichment = True
                 self.logger.info(f"Skipping {city_name} - file exists and update_existing=False")
             if self.enrich_data and not skip_enrichment:
@@ -161,7 +161,7 @@ class GlobalCityAnalyzer:
             renderer = StreetEndRenderer(
                 str(geojson_path),
                 city_name,
-                summary_file=str(city_dir / 'summary.json')
+                summary_file=str(summary_path)
             )
             map_html = city_dir / 'map.html'
             renderer.render(str(map_html))

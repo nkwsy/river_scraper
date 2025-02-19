@@ -35,7 +35,7 @@ def setup_logger(name, log_dir='logs'):
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(console_formatter)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.WARNING)
     
     # Add handlers
     logger.addHandler(file_handler)

@@ -10,7 +10,7 @@ import json
 from google_maps_export import GoogleMapsExporter
 import geopandas as gpd
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor,as_completed
 import threading
 from utils.logging_config import setup_logger
 from datetime import datetime
@@ -42,7 +42,8 @@ class GlobalCityAnalyzer:
         self.find_street_ends = kwargs.get('find_street_ends', True)
         self.enrich_data = kwargs.get('enrich_data', True)
         self.start_time = None
-
+        self.max_workers = kwargs.get('max_workers', 4)
+        self.update_existing = kwargs.get('update_existing', False)
     def get_top_cities(self, num_cities=1000):
         """Get list of top 1000 cities by population"""
         try:
@@ -96,6 +97,10 @@ class GlobalCityAnalyzer:
             # Path for the output file
             geojson_path = city_dir / 'street_ends.geojson'
             
+            # Skip if file exists and we're not updating
+            if geojson_path.exists() and not self.update_existing:
+                self.logger.info(f"Skipping {city_name} - file exists and update_existing=False")
+                return None
             if self.find_street_ends:
                 self.logger.info(f"Finding street ends for {city_name}")
                 start = time.time()
@@ -115,20 +120,24 @@ class GlobalCityAnalyzer:
             return None
 
     @log_timing
-    async def analyze_city_stage2_async(self, city_row):
-        """Async version of analyze_city_stage2"""
+    def analyze_city_stage2(self, city_row):
+        """Synchronous version of analyze_city_stage2_async"""
         try:
             city_name = f"{city_row['name']}, {city_row['country_code']}"
             self.logger.info(f"Starting enrichment for {city_name}")
             
             city_dir = self.output_dir / city_row['country_code'] / city_row['name'].replace('/', '_')
             geojson_path = city_dir / 'street_ends.geojson'
-            
+            summary_file=str(city_dir / 'summary.json')
+            skip_enrichment = False
+
             if not geojson_path.exists():
                 self.logger.warning(f"Cannot enrich {city_name}, missing {geojson_path}")
                 return None
-
-            if self.enrich_data:
+            if summary_file.exists() and not self.update_existing:
+                skip_enrichment = True
+                self.logger.info(f"Skipping {city_name} - file exists and update_existing=False")
+            if self.enrich_data and not skip_enrichment:
                 self.logger.info(f"Enriching data for {city_name}")
                 start = time.time()
                 config = LocationConfig(
@@ -139,8 +148,9 @@ class GlobalCityAnalyzer:
                     save_detailed_json=True
                 )
                 enricher = LocationEnricher(config)
-                results = await enricher.process_locations(str(geojson_path))
-                await enricher.cleanup()
+                # Use asyncio.run to run the async method in a sync context
+                results = asyncio.run(enricher.process_locations(str(geojson_path)))
+                asyncio.run(enricher.cleanup())
                 self.logger.info(f"Enrichment completed in {time.time() - start:.2f} seconds")
             else:
                 results = []
@@ -157,7 +167,7 @@ class GlobalCityAnalyzer:
             renderer.render(str(map_html))
             self.logger.info(f"Map rendering completed in {time.time() - start:.2f} seconds")
 
-            # Save summary as GeoJSON FeatureCollection with city metadata as properties
+            # Create summary
             summary = {
                 'type': 'FeatureCollection',
                 'name': 'street_ends',
@@ -199,8 +209,8 @@ class GlobalCityAnalyzer:
         2) For each city, generate street_ends.geojson
         """
         self.start_time = time.time()
-        self.logger.info(f"Starting Global Analysis Stage 1 with {num_cities} cities using {max_workers} workers")
-        self.logger.info(f"Target cities: {target_cities if target_cities else 'Using top cities by population'}")
+        self.logger.warning(f"Starting Global Analysis Stage 1 with {num_cities} cities using {max_workers} workers")
+        self.logger.warning(f"Target cities: {target_cities if target_cities else 'Using top cities by population'}")
         
         if target_cities is None:
             cities = self.get_top_cities(num_cities)
@@ -212,7 +222,7 @@ class GlobalCityAnalyzer:
             return
 
         results = []
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
             # Create a dictionary of future to city name for better error reporting
             future_to_city = {
                 executor.submit(self.analyze_city_stage1, city): city['name'] 
@@ -228,7 +238,7 @@ class GlobalCityAnalyzer:
                     result = future.result()
                     if result:
                         results.append(result)
-                        self.logger.info(f"Successfully processed {city_name}")
+                        self.logger.warning(f"Successfully processed {city_name}")
                 except Exception as e:
                     self.logger.error(f"City processing failed for {city_name}: {str(e)}", 
                                     exc_info=True)
@@ -241,10 +251,10 @@ class GlobalCityAnalyzer:
         return results
 
     @log_timing
-    async def run_global_analysis_stage2_async(self, num_cities=10, target_cities=None):
-        """Async version of run_global_analysis_stage2"""
+    def run_global_analysis_stage2(self, num_cities=10, target_cities=None, max_workers=4):
+        """Process multiple cities using ProcessPoolExecutor"""
         self.start_time = time.time()
-        self.logger.info(f"Starting Global Analysis Stage 2 with {num_cities} cities")
+        self.logger.info(f"Starting Global Analysis Stage 2 with {num_cities} cities using {max_workers} workers")
         self.logger.info(f"Target cities: {target_cities if target_cities else 'Using top cities by population'}")
         
         if target_cities is None:
@@ -256,21 +266,33 @@ class GlobalCityAnalyzer:
             self.logger.error("Failed to get city list for Stage 2")
             return
 
-        tasks = []
-        for _, city in cities.head(num_cities).iterrows():
-            tasks.append(self.analyze_city_stage2_async(city))
+        results = []
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            # Create a dictionary of future to city name for better error reporting
+            future_to_city = {
+                executor.submit(self.analyze_city_stage2, city): city['name'] 
+                for _, city in cities.head(num_cities).iterrows()
+            }
 
-        results = await asyncio.gather(*tasks)
-        results = [r for r in results if r is not None]
+            # Process completed futures as they come in
+            for future in tqdm(as_completed(future_to_city), 
+                             total=len(future_to_city), 
+                             desc="Processing cities"):
+                city_name = future_to_city[future]
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                        self.logger.warning(f"Successfully processed {city_name}")
+                except Exception as e:
+                    self.logger.error(f"City processing failed for {city_name}: {str(e)}", 
+                                    exc_info=True)
 
         # Save final results
         with open(self.output_dir / 'stage2_results.json', 'w') as f:
             json.dump(results, f, indent=2)
+        
         return results
-
-    def run_global_analysis_stage2(self, num_cities=10, target_cities=None):
-        """Synchronous wrapper for run_global_analysis_stage2_async"""
-        return asyncio.run(self.run_global_analysis_stage2_async(num_cities, target_cities))
 
     def run_global_analysis(self, num_cities=100, target_cities=None):
         """Analyze all top cities sequentially"""
@@ -619,7 +641,7 @@ class GlobalCityAnalyzer:
 
 if __name__ == "__main__":
     # cities_to_run = ["Skokie", "Chicago", "Toronto"]
-    cities_to_run = ["Chicago" ]
+    cities_to_run = [ 'Skokie', "Austin"]
 
     # Stage 1
     # analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
@@ -628,17 +650,17 @@ if __name__ == "__main__":
     #     target_cities=cities_to_run
     # )
 
-    analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
+    analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False, max_workers=4)
     analyzer_stage1.run_global_analysis_stage1(
-        num_cities=300,
-        # target_cities=cities_to_run
+        # num_cities=300,
+        target_cities=cities_to_run
     )
 
     # Stage 2
     analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True)
     results = analyzer_stage2.run_global_analysis_stage2(
-        num_cities=300,
-        # target_cities=cities_to_run
+        # num_cities=300,
+        target_cities=cities_to_run
     )
     analyzer_stage2.generate_report(results)
 

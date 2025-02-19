@@ -144,7 +144,7 @@ class GlobalCityAnalyzer:
                     radius_km=1.0,
                     output_dir=city_dir,
                     max_locations=-1,
-                    save_images=True,
+                    save_images=False,
                     save_detailed_json=True
                 )
                 enricher = LocationEnricher(config)

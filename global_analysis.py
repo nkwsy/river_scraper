@@ -192,14 +192,14 @@ class GlobalCityAnalyzer:
             return None
 
     @log_timing
-    def run_global_analysis_stage1(self, num_cities=10, target_cities=None):
+    def run_global_analysis_stage1(self, num_cities=10, target_cities=None, max_workers=4):
         """
-        Runs only Stage 1 for multiple cities:
+        Runs only Stage 1 for multiple cities using concurrent processing:
         1) Get top cities or user-specified target cities
         2) For each city, generate street_ends.geojson
         """
         self.start_time = time.time()
-        self.logger.info(f"Starting Global Analysis Stage 1 with {num_cities} cities")
+        self.logger.info(f"Starting Global Analysis Stage 1 with {num_cities} cities using {max_workers} workers")
         self.logger.info(f"Target cities: {target_cities if target_cities else 'Using top cities by population'}")
         
         if target_cities is None:
@@ -212,14 +212,33 @@ class GlobalCityAnalyzer:
             return
 
         results = []
-        for _, city in tqdm(cities.head(num_cities).iterrows(), total=len(cities.head(num_cities)), desc="Stage 1"):
-            res = self.analyze_city_stage1(city)
-            if res:
-                results.append(res)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Create a dictionary of future to city name for better error reporting
+            future_to_city = {
+                executor.submit(self.analyze_city_stage1, city): city['name'] 
+                for _, city in cities.head(num_cities).iterrows()
+            }
 
-        # Save partial results if you want
+            # Process completed futures as they come in
+            for future in tqdm(as_completed(future_to_city), 
+                             total=len(future_to_city), 
+                             desc="Processing cities"):
+                city_name = future_to_city[future]
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                        self.logger.info(f"Successfully processed {city_name}")
+                except Exception as e:
+                    self.logger.error(f"City processing failed for {city_name}: {str(e)}", 
+                                    exc_info=True)
+
+        # Save partial results
         with open(self.output_dir / 'stage1_results.json', 'w') as f:
             json.dump(results, f, indent=2)
+
+        self.logger.info(f"Stage 1 complete. Successfully processed {len(results)} out of {num_cities} cities")
+        return results
 
     @log_timing
     async def run_global_analysis_stage2_async(self, num_cities=10, target_cities=None):
@@ -611,14 +630,14 @@ if __name__ == "__main__":
 
     analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
     analyzer_stage1.run_global_analysis_stage1(
-        num_cities=250,
+        num_cities=300,
         # target_cities=cities_to_run
     )
 
     # Stage 2
     analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True)
     results = analyzer_stage2.run_global_analysis_stage2(
-        num_cities=250,
+        num_cities=300,
         # target_cities=cities_to_run
     )
     analyzer_stage2.generate_report(results)

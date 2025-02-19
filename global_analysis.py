@@ -609,17 +609,17 @@ if __name__ == "__main__":
     #     target_cities=cities_to_run
     # )
 
-    # analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
-    # analyzer_stage1.run_global_analysis_stage1(
-    #     num_cities=250,
-    #     # target_cities=cities_to_run
-    # )
+    analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
+    analyzer_stage1.run_global_analysis_stage1(
+        num_cities=250,
+        # target_cities=cities_to_run
+    )
 
     # Stage 2
     analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True)
     results = analyzer_stage2.run_global_analysis_stage2(
-        # num_cities=250,
-        target_cities=cities_to_run
+        num_cities=250,
+        # target_cities=cities_to_run
     )
     analyzer_stage2.generate_report(results)
 

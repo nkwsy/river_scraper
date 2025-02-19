@@ -186,13 +186,6 @@ class LocationEnricher:
         """
         Get basic information about the nearest waterway (name, type, width),
         prioritizing named water features.
-        
-        Args:
-            point: The location point
-            buffer_area: The buffered area around the point (optional)
-        
-        Returns:
-            Dict with basic waterway information
         """
         try:
             # Create a buffer for water features (500m)
@@ -232,6 +225,10 @@ class LocationEnricher:
             # Calculate distances to all features
             distances = water_features.geometry.distance(point_proj.geometry.iloc[0])
             
+            # Check if 'name' column exists, if not add it with None values
+            if 'name' not in water_features.columns:
+                water_features['name'] = None
+            
             # First try to find named features within the buffer
             named_features = water_features[water_features['name'].notna()]
             
@@ -250,12 +247,10 @@ class LocationEnricher:
             try:
                 # Determine the water feature type
                 feature_type = 'Unknown'
-                if 'waterway' in nearest_feature and pd.notna(nearest_feature['waterway']):
-                    feature_type = nearest_feature['waterway']
-                elif 'natural' in nearest_feature and pd.notna(nearest_feature['natural']):
-                    feature_type = nearest_feature['natural']
-                elif 'water' in nearest_feature and pd.notna(nearest_feature['water']):
-                    feature_type = nearest_feature['water']
+                for type_col in ['waterway', 'natural', 'water']:
+                    if type_col in nearest_feature and pd.notna(nearest_feature[type_col]):
+                        feature_type = nearest_feature[type_col]
+                        break
                 
                 # Handle name - replace nan with 'Unknown'
                 name = nearest_feature.get('name', 'Unknown')

@@ -16,7 +16,7 @@ os.makedirs(cache_dir, exist_ok=True)
 # Configure OSMnx
 ox.settings.use_cache = True
 ox.settings.cache_folder = cache_dir
-ox.settings.log_console = True
+ox.settings.log_console = False
 ox.settings.overpass_url = overpass_url
 ox.settings.overpass_rate_limit = overpass_rate_limit
 

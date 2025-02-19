@@ -27,7 +27,8 @@ class StreetEndFinder:
         """Download street and water data"""
         self.logger.info(f"Processing {self.location}")
         
-        # Get street network
+        # Get street network 
+        # TODO: add simplify=True to see if faster, filter only walkways needed
         graph = ox.graph_from_place(self.location, network_type='all')
         self.streets = ox.graph_to_gdfs(graph, nodes=False, edges=True)
         

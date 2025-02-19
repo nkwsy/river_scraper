@@ -409,10 +409,19 @@ class LocationEnricher:
 
         features = geojson['features'][:self.config.max_locations] if self.config.max_locations > 0 else geojson['features']
         
-        tasks = []
-        for idx, feature in enumerate(features):
-            lon, lat = feature['geometry']['coordinates']
-            tasks.append(self.enrich_location(lat, lon, str(idx)))
+        # Create a semaphore to limit concurrent operations
+        sem = asyncio.Semaphore(20)  # Adjust this number based on your needs (e.g., 5-20)
+
+        async def process_feature(feature, idx):
+            async with sem:  # This ensures only N operations run at once
+                lon, lat = feature['geometry']['coordinates']
+                return await self.enrich_location(lat, lon, str(idx))
+
+        # Create tasks with controlled concurrency
+        tasks = [
+            process_feature(feature, idx)
+            for idx, feature in enumerate(features)
+        ]
 
         results = await asyncio.gather(*tasks)
         

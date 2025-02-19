@@ -163,6 +163,8 @@ class GlobalCityAnalyzer:
                 'name': 'street_ends',
                 'properties': {
                     'city_name': city_name,
+                    'country_code': city_row['country_code'],
+                    'name': city_row['name'],
                     'population': city_row['population'],
                     'latitude': city_row['latitude'],
                     'longitude': city_row['longitude'],
@@ -368,6 +370,8 @@ class GlobalCityAnalyzer:
                             <thead>
                                 <tr>
                                     <th>City</th>
+                                    <th>Country</th>
+                                    <th>Population</th>
                                     <th>Street Ends</th>
                                     <th>Action</th>
                                 </tr>
@@ -399,6 +403,8 @@ class GlobalCityAnalyzer:
                 rows += f"""
                     <tr>
                         <td>{city['city_name']}</td>
+                        <td>{city['country_code']}</td>
+                        <td>{city['population']}</td>
                         <td>{city['total_street_ends']}</td>
                         <td><a href="{map_path}" target="_blank" class="btn btn-sm btn-primary">View Map</a></td>
                     </tr>
@@ -481,6 +487,8 @@ class GlobalCityAnalyzer:
             # Convert summaries to DataFrame for analysis
             df = pd.DataFrame([{
                 'city_name': s['properties']['city_name'],
+                'country_code': s['properties']['country_code'],
+                'name': s['properties']['name'],
                 'population': s['properties']['population'],
                 'total_street_ends': s['properties']['total_street_ends'],
                 'latitude': s['properties']['latitude'],
@@ -530,8 +538,9 @@ class GlobalCityAnalyzer:
                             <thead>
                                 <tr>
                                     <th>City</th>
-                                    <th>Street Ends</th>
+                                    <th>Country</th>
                                     <th>Population</th>
+                                    <th>Street Ends</th>
                                     <th>Action</th>
                                 </tr>
                             </thead>
@@ -560,16 +569,21 @@ class GlobalCityAnalyzer:
             country_code = city_name.split(',')[1].strip()
             city = city_name.split(',')[0].strip()
             map_path = f"{country_code}/{city}/map.html"
+            summary_path = f"{country_code}/{city}/summary.json"
             
             # Check if map exists
             if (self.output_dir / map_path).exists():
                 rows += f"""
                     <tr>
                         <td>{city_name}</td>
-                        <td>{row['total_street_ends']}</td>
+                        <td>{country_code}</td>
                         <td>{row['population']:,}</td>
+                        <td>{row['total_street_ends']}</td>
                         <td>
                             <a href="{map_path}" target="_blank" class="btn btn-sm btn-primary">View Map</a>
+                        </td>
+                        <td>
+                            <a href="{summary_path}" target="_blank" class="btn btn-sm btn-primary">View raw data</a>
                         </td>
                     </tr>
                 """
@@ -585,7 +599,8 @@ class GlobalCityAnalyzer:
         return rows
 
 if __name__ == "__main__":
-    cities_to_run = ["Skokie", "Chicago", "Toronto"]
+    # cities_to_run = ["Skokie", "Chicago", "Toronto"]
+    cities_to_run = ["Chicago" ]
 
     # Stage 1
     # analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
@@ -603,8 +618,8 @@ if __name__ == "__main__":
     # Stage 2
     analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True)
     results = analyzer_stage2.run_global_analysis_stage2(
-        num_cities=250,
-        # target_cities=cities_to_run
+        # num_cities=250,
+        target_cities=cities_to_run
     )
     analyzer_stage2.generate_report(results)
 

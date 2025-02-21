@@ -27,20 +27,37 @@ class StreetEndFinder:
         """Download street and water data"""
         self.logger.info(f"Processing {self.location}")
         
-        # Get street network 
-        # TODO: add simplify=True to see if faster, filter only walkways needed
-        graph = ox.graph_from_place(self.location, network_type='all')
-        self.streets = ox.graph_to_gdfs(graph, nodes=False, edges=True)
-        
-        # Get water features
+        # Get water features first
         water_tags = {
-            "natural": [ "stream", "riverbank"],
+            # "natural": ["stream", "riverbank"],
             "water": ["river", "stream", "canal"]
         }
         self.water_features = ox.features_from_place(self.location, tags=water_tags)
         
+        if self.water_features.empty:
+            self.logger.warning("No water features found")
+            return
+            
+        # Create a buffer around water features (e.g., 100 meters)
+        # Convert to projected CRS for accurate buffer distance
+        water_features_proj = self.water_features.to_crs('EPSG:3857')
+        buffer_distance = 100  # meters
+        water_buffer = water_features_proj.geometry.buffer(buffer_distance).unary_union
+        
+        # Convert back to WGS84 for OSMnx
+        water_buffer_wgs = gpd.GeoSeries([water_buffer], crs='EPSG:3857').to_crs('EPSG:4326')[0]
+        
+        # Get street network only within the buffered area
+        graph = ox.graph_from_polygon(
+            water_buffer_wgs,
+            network_type='all',
+            simplify=True,
+            truncate_by_edge=True
+        )
+        self.streets = ox.graph_to_gdfs(graph, nodes=False, edges=True)
+        
         self.logger.info(f"Found {len(self.water_features)} water features")
-        self.logger.info(f"Found {len(self.streets)} streets")
+        self.logger.info(f"Found {len(self.streets)} streets within {buffer_distance}m of water")
         
     def find_street_ends(self):
         """Identify all street endpoints"""
@@ -55,25 +72,38 @@ class StreetEndFinder:
     def find_near_water(self):
         """Find street ends near water"""
         river_geom = self.water_features.geometry.unary_union
-        seen_coords = set()
+        seen_points = []  # List of Points instead of coords
         self.logger.info(f"\nChecking proximity to water (threshold: {self.threshold_distance}m)...")
+        
+        # Convert to projected CRS for accurate distance measurements
+        river_geom_proj = gpd.GeoSeries([river_geom], crs='EPSG:4326').to_crs('EPSG:3857')[0]
         
         for i, point in enumerate(self.street_ends):
             if i % 1000 == 0:
                 self.logger.info(f"Processed {i}/{len(self.street_ends)} points...")
             
-            distance = river_geom.distance(point) * 111000
+            # Convert point to projected CRS
+            point_proj = gpd.GeoSeries([point], crs='EPSG:4326').to_crs('EPSG:3857')[0]
+            
+            # Check distance to water
+            distance = river_geom_proj.distance(point_proj)
             if distance < self.threshold_distance:
-                coord = (round(point.x, 6), round(point.y, 6))
-                if coord not in seen_coords:
-                    # Create a new Point with properties instead of adding attribute
+                # Check if point is too close to any existing points
+                is_too_close = False
+                for seen_point in seen_points:
+                    if point_proj.distance(seen_point) < 25:  # 25 meters
+                        is_too_close = True
+                        break
+                
+                if not is_too_close:
+                    # Create a new Point with properties
                     point_with_props = {
                         'type': 'Feature',
-                        'geometry': point,
-                        'properties': {'distance_to_water': round(distance, 2)}
+                        'geometry': point,  # Original WGS84 point for storage
+                        'properties': {'distance_to_water': round(float(distance), 2)}
                     }
                     self.near_water.append(point_with_props)
-                    seen_coords.add(coord)
+                    seen_points.append(point_proj)  # Store projected point for distance checks
         
         self.logger.info("\nResults:")
         self.logger.info(f"Total street ends: {len(self.street_ends)}")

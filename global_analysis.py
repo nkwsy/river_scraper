@@ -641,28 +641,28 @@ class GlobalCityAnalyzer:
 
 if __name__ == "__main__":
     # cities_to_run = ["Skokie", "Chicago", "Toronto"]
-    cities_to_run = [ 'Skokie', "Austin"]
+    cities_to_run = [ 'Skokie', "Chicago"]
 
     # Stage 1
-    # analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False)
+    analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False, update_existing=True)
+    analyzer_stage1.run_global_analysis_stage1(
+        # num_cities=len(cities_to_run),
+        target_cities=['Skokie', 'Chicago']
+    )
+
+    # analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False, max_workers=4)
     # analyzer_stage1.run_global_analysis_stage1(
-    #     # num_cities=len(cities_to_run),
+    #     # num_cities=300,
     #     target_cities=cities_to_run
     # )
 
-    analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False, max_workers=4)
-    analyzer_stage1.run_global_analysis_stage1(
-        # num_cities=300,
-        target_cities=cities_to_run
-    )
-
     # Stage 2
-    analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True)
+    analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True, update_existing=True)
     results = analyzer_stage2.run_global_analysis_stage2(
         # num_cities=300,
-        target_cities=cities_to_run
+        target_cities=['Skokie', 'Chicago']
     )
-    analyzer_stage2.generate_report(results)
+    # analyzer_stage2.generate_report(results)
 
     # Stage 3: Generate report
     analyzer_stage3 = GlobalCityAnalyzer()

@@ -189,7 +189,7 @@ class LocationEnricher:
         """
         try:
             # Create a buffer for water features (500m)
-            water_buffer = point.buffer(0.5 / 111)  # 0.5km converted to degrees
+            water_buffer = point.buffer(0.25 / 111)  # 0.5km converted to degrees
             
             # More inclusive water feature tags
             waterway_tags = {
@@ -225,59 +225,64 @@ class LocationEnricher:
             # Calculate distances to all features
             distances = water_features.geometry.distance(point_proj.geometry.iloc[0])
             
-            # Check if 'name' column exists, if not add it with None values
-            if 'name' not in water_features.columns:
-                water_features['name'] = None
+            # Get the nearest feature first
+            min_distance_idx = distances.astype(float).idxmin()
+            nearest_feature = water_features.loc[min_distance_idx]
             
-            # First try to find named features within the buffer
-            named_features = water_features[water_features['name'].notna()]
+            # Try to find a named feature within 1.5x the distance to the nearest feature
+            min_distance = distances[min_distance_idx]
+            nearby_features = water_features[distances <= min_distance * 1.5]
+            
+            # Look for named features among nearby features
+            named_features = nearby_features[
+                nearby_features.apply(
+                    lambda x: any(
+                        isinstance(v, str) and len(v.strip()) > 0 
+                        for v in [x.get('name'), x.get('waterway'), x.get('water')]
+                    ),
+                    axis=1
+                )
+            ]
             
             if not named_features.empty:
-                # Get distances to named features only
-                named_distances = distances[named_features.index]
-                min_distance_idx = named_distances.astype(float).idxmin()
-                nearest_feature = water_features.loc[min_distance_idx]
                 logger.info("Found named water feature")
+                # Use the nearest named feature
+                named_distances = distances[named_features.index]
+                min_named_idx = named_distances.astype(float).idxmin()
+                feature_to_use = water_features.loc[min_named_idx]
             else:
-                # Fall back to nearest feature if no named features found
-                min_distance_idx = distances.astype(float).idxmin()
-                nearest_feature = water_features.loc[min_distance_idx]
                 logger.info("No named features found, using nearest water feature")
+                feature_to_use = nearest_feature
             
-            try:
-                # Determine the water feature type
-                feature_type = 'Unknown'
-                for type_col in ['waterway', 'natural', 'water']:
-                    if type_col in nearest_feature and pd.notna(nearest_feature[type_col]):
-                        feature_type = nearest_feature[type_col]
+            # Determine the water feature type
+            feature_type = 'Unknown'
+            for type_col in ['waterway', 'natural', 'water']:
+                if type_col in feature_to_use and pd.notna(feature_to_use[type_col]):
+                    feature_type = feature_to_use[type_col]
+                    break
+            
+            # Get name from various possible columns
+            name = 'Unknown'
+            for name_col in ['name', 'waterway', 'water']:
+                if name_col in feature_to_use and pd.notna(feature_to_use[name_col]):
+                    name_val = feature_to_use[name_col]
+                    if isinstance(name_val, str) and len(name_val.strip()) > 0:
+                        name = name_val
                         break
-                
-                # Handle name - replace nan with 'Unknown'
-                name = nearest_feature.get('name', 'Unknown')
-                if pd.isna(name):
-                    name = 'Unknown'
-                
-                # Extract width if available
-                width = nearest_feature.get('width', 'Unknown')
-                if pd.isna(width):
-                    width = 'Unknown'
-                
-                waterway_info = {
-                    'name': name,
-                    'type': feature_type,
-                    'width': width
-                }
-                
-                logger.info(f"Found waterway: {waterway_info}")
-                return waterway_info
-                
-            except Exception as e:
-                logger.error(f"Error accessing nearest feature: {str(e)}")
-                return {
-                    'name': 'Unknown',
-                    'type': 'Unknown',
-                    'width': 'Unknown'
-                }
+            
+            # Extract width if available
+            width = feature_to_use.get('width', 'Unknown')
+            if pd.isna(width):
+                width = 'Unknown'
+            
+            waterway_info = {
+                'name': name,
+                'type': feature_type,
+                'width': width
+            }
+            
+            logger.info(f"Found waterway: {waterway_info}")
+            return waterway_info
                 
         except Exception as e:
             logger.error(f"Error getting waterway info: {str(e)}", exc_info=True)

@@ -104,7 +104,7 @@ class GlobalCityAnalyzer:
             if self.find_street_ends:
                 self.logger.info(f"Finding street ends for {city_name}")
                 start = time.time()
-                finder = StreetEndFinder(city_name, threshold_distance=10, geojson_file=geojson_path, city_dir=city_dir)
+                finder = StreetEndFinder(city_name, threshold_distance=30, geojson_file=geojson_path, city_dir=city_dir)
                 water_features, near_water = finder.process()
                 self.logger.info(f"Found {len(near_water) if near_water else 0} street ends in {time.time() - start:.2f} seconds")
                 

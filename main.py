@@ -7,10 +7,8 @@ import geopandas as gpd
 from shapely.geometry import Point
 import os
 from dotenv import load_dotenv
-import matplotlib.pyplot as plt
-import contextily as ctx
 
-from enrich_data import LocationEnricher
+from enrich_data import LocationEnricher, LocationConfig
 from render_map import StreetEndRenderer
 from utils.logging_config import setup_logger
 
@@ -32,9 +30,11 @@ class StreetEndFinder:
         """Download street and water data"""
         self.logger.info(f"Processing {self.location}")
         
-        # Get water features first
+        # Get city boundary first to constrain our search
+        city_boundary = ox.geocode_to_gdf(self.location)
+        
+        # Get water features
         water_tags = {
-            # "natural": ["stream", "riverbank"],
             "water": ["river", "stream", "canal"]
         }
         self.water_features = ox.features_from_place(self.location, tags=water_tags)
@@ -42,20 +42,27 @@ class StreetEndFinder:
         if self.water_features.empty:
             self.logger.warning("No water features found")
             return
-            
-        # Create a buffer around water features (e.g., 100 meters)
-        # Convert to projected CRS for accurate buffer distance
+        
+        # Project to a local CRS for accurate geometry operations
+        city_boundary_proj = city_boundary.to_crs('EPSG:3857')
         water_features_proj = self.water_features.to_crs('EPSG:3857')
+        
+        # Combine all water features into a single polygon
+        combined_water = water_features_proj.geometry.unary_union
+        
+        # Create buffer around water
         buffer_distance = 100  # meters
-        water_buffer = water_features_proj.geometry.buffer(buffer_distance).union_all()
+        water_buffer = combined_water.buffer(buffer_distance)
+        
+        # Constrain to city boundary
+        water_buffer_city = water_buffer.intersection(city_boundary_proj.geometry.unary_union)
         
         # Convert back to WGS84 for OSMnx
-        water_buffer_wgs = gpd.GeoSeries([water_buffer], crs='EPSG:3857').to_crs('EPSG:4326')
+        water_buffer_wgs = gpd.GeoSeries([water_buffer_city], crs='EPSG:3857').to_crs('EPSG:4326')[0]
         
         # Set up graph file path
         load_dotenv()
         
-
         graphs_dir = os.path.join(self.city_dir, 'graphs')
         os.makedirs(graphs_dir, exist_ok=True)
         
@@ -182,44 +189,6 @@ class StreetEndFinder:
         self.save_results()
         return self.water_features, self.near_water
 
-    def visualize_water_features(self):
-        """Visualize water features on a map"""
-        # Create a basic plot
-        fig, ax = plt.subplots(figsize=(15, 15))
-        
-        # Plot water features in blue
-        self.water_features.plot(
-            ax=ax,
-            color='blue',
-            alpha=0.5,
-            label='Water Features'
-        )
-        
-        # Add streets if they exist
-        if self.streets is not None:
-            self.streets.plot(
-                ax=ax,
-                color='gray',
-                linewidth=0.5,
-                alpha=0.5,
-                label='Streets'
-            )
-        
-        # Add title and legend
-        ax.set_title(f'Water Features in {self.location}')
-        ax.legend()
-        
-        # Add background map using contextily (optional)
-        ax.set_axis_off()
-        ctx.add_basemap(
-            ax,
-            crs=self.water_features.crs.to_string(),
-            source=ctx.providers.CartoDB.Positron
-        )
-        
-        plt.show()
-
-# Example usage:
 if __name__ == "__main__":
     # Can be run for different cities
     cities = ["Chicago, USA"]
@@ -229,13 +198,19 @@ if __name__ == "__main__":
         finder.process()
         
         # enrich data
-        enricher = LocationEnricher()
+        config = LocationConfig(
+                    radius_km=1.0,
+                    output_dir='',
+                    max_locations=-1,
+                    save_images=False,
+                    save_detailed_json=True
+                )
+        enricher = LocationEnricher(config)
         enricher.process_locations('street_ends_near_river.geojson')
         # Render the results
         output_file = f"street_ends_{city.split(',')[0].lower()}.html"
         renderer = StreetEndRenderer('street_ends_near_river.geojson', city)
         renderer.render(output_file)
 
-        finder.visualize_water_features()
 
 

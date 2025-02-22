@@ -50,7 +50,7 @@ class StreetEndFinder:
         water_buffer = water_features_proj.geometry.buffer(buffer_distance).union_all()
         
         # Convert back to WGS84 for OSMnx
-        water_buffer_wgs = gpd.GeoSeries([water_buffer], crs='EPSG:3857').to_crs('EPSG:4326')[0]
+        water_buffer_wgs = gpd.GeoSeries([water_buffer], crs='EPSG:3857').to_crs('EPSG:4326')
         
         # Set up graph file path
         load_dotenv()

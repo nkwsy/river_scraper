@@ -182,42 +182,6 @@ class StreetEndFinder:
         self.save_results()
         return self.water_features, self.near_water
 
-    def visualize_water_features(self):
-        """Visualize water features on a map"""
-        # Create a basic plot
-        fig, ax = plt.subplots(figsize=(15, 15))
-        
-        # Plot water features in blue
-        self.water_features.plot(
-            ax=ax,
-            color='blue',
-            alpha=0.5,
-            label='Water Features'
-        )
-        
-        # Add streets if they exist
-        if self.streets is not None:
-            self.streets.plot(
-                ax=ax,
-                color='gray',
-                linewidth=0.5,
-                alpha=0.5,
-                label='Streets'
-            )
-        
-        # Add title and legend
-        ax.set_title(f'Water Features in {self.location}')
-        ax.legend()
-        
-        # Add background map using contextily (optional)
-        ax.set_axis_off()
-        ctx.add_basemap(
-            ax,
-            crs=self.water_features.crs.to_string(),
-            source=ctx.providers.CartoDB.Positron
-        )
-        
-        plt.show()
 
 # Example usage:
 if __name__ == "__main__":
@@ -236,6 +200,6 @@ if __name__ == "__main__":
         renderer = StreetEndRenderer('street_ends_near_river.geojson', city)
         renderer.render(output_file)
 
-        finder.visualize_water_features()
+
 
 

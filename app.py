@@ -8,7 +8,8 @@ import geopandas as gpd
 import pandas as pd
 import folium
 from folium.plugins import MarkerCluster
-from streamlit_folium import folium_static
+# from streamlit_folium import folium_static
+from streamlit_folium import st_folium
 import time
 
 def load_config():
@@ -44,7 +45,7 @@ def run_analysis(location, threshold, buffer, dedup_distance):
     save_config(config)
     
     # Run the command
-    cmd = ["python", "main.py"]
+    cmd = ["python", "main_web.py"]
     
     try:
         with st.spinner(f"Analyzing {location}..."):
@@ -104,7 +105,7 @@ def display_map(geojson_file):
             ).add_to(marker_cluster)
         
         # Display the map
-        folium_static(m)
+        st_folium(m)
         
         # Display data table
         with st.expander("View Data Table"):

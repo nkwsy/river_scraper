@@ -1,6 +1,15 @@
 analysis:
-  buffer_distance: 100
+  buffer_distance: 99
   deduplication_distance: 25
-  threshold_distance: 13
+  threshold_distance: 40
 locations:
 - Skokie, USA
+output:
+  geojson_filename: street_ends_{location}.geojson
+  map_filename_template: street_ends_{location}.html
+water_features:
+  natural:
+  - water
+  water:
+  - river
+  - canal

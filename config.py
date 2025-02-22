@@ -11,13 +11,42 @@ class Config:
         """Load configuration from YAML file"""
         if not self.config_file.exists():
             self._create_default_config()
+            return self.settings
         
         with open(self.config_file, 'r') as f:
-            return yaml.safe_load(f)
+            config = yaml.safe_load(f)
+            
+        # Ensure all required sections exist with default values
+        default_config = {
+            'locations': ['Skokie, USA'],
+            'water_features': {
+                'water': ['river', 'stream', 'canal']
+            },
+            'analysis': {
+                'threshold_distance': 10,
+                'buffer_distance': 100,
+                'deduplication_distance': 25
+            },
+            'output': {
+                'geojson_filename': 'street_ends_{location}.geojson',
+                'map_filename_template': 'street_ends_{location}.html'
+            }
+        }
+        
+        # Merge with defaults, keeping existing values
+        for section, defaults in default_config.items():
+            if section not in config:
+                config[section] = defaults
+            elif isinstance(defaults, dict):
+                for key, value in defaults.items():
+                    if key not in config[section]:
+                        config[section][key] = value
+        
+        return config
     
     def _create_default_config(self):
         """Create default configuration file"""
-        default_config = {
+        self.settings = {
             'locations': ['Skokie, USA'],
             'water_features': {
                 'water': ['river', 'stream', 'canal']
@@ -28,13 +57,13 @@ class Config:
                 'deduplication_distance': 25  # meters
             },
             'output': {
-                'geojson_filename': 'street_ends_near_water.geojson',
+                'geojson_filename': 'street_ends_{location}.geojson',
                 'map_filename_template': 'street_ends_{location}.html'
             }
         }
         
         with open(self.config_file, 'w') as f:
-            yaml.dump(default_config, f, default_flow_style=False)
+            yaml.dump(self.settings, f, default_flow_style=False)
     
     def get_locations(self):
         """Get list of locations to process"""

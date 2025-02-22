@@ -73,7 +73,7 @@ class StreetEndFinder:
         # Get street network only within the buffered area
         graph = ox.graph_from_polygon(
             water_buffer_wgs,
-            network_type='',
+            network_type='drive',
             simplify=True,
             truncate_by_edge=True
         )
@@ -86,10 +86,36 @@ class StreetEndFinder:
         """Identify all street endpoints"""
         self.logger.info("Collecting street ends...")
         for _, row in self.streets.iterrows():
-            start_point = Point(row['geometry'].coords[0])
-            end_point = Point(row['geometry'].coords[-1])
-            self.street_ends.append(start_point)
-            self.street_ends.append(end_point)
+            # Only process if the street is drivable (has a highway tag)
+            if 'highway' in row and row['highway'] in [
+                'motorway', 'trunk', 'primary', 'secondary', 
+                'tertiary', 'residential', 'unclassified',
+                'motorway_link', 'trunk_link', 'primary_link',
+                'secondary_link', 'tertiary_link'
+            ]:
+                # Get relevant OSM attributes
+                properties = {
+                    'highway': row.get('highway'),
+                    'name': row.get('name', 'unnamed'),
+                    'osmid': row.get('osmid'),
+                    'oneway': row.get('oneway', False),
+                    'maxspeed': row.get('maxspeed'),
+                    'point_type': None  # Will be set to 'start' or 'end'
+                }
+                
+                # Create points with properties
+                start_point = {
+                    'geometry': Point(row['geometry'].coords[0]),
+                    'properties': {**properties, 'point_type': 'start'}
+                }
+                end_point = {
+                    'geometry': Point(row['geometry'].coords[-1]),
+                    'properties': {**properties, 'point_type': 'end'}
+                }
+                
+                self.street_ends.append(start_point)
+                self.street_ends.append(end_point)
+        
         self.logger.info(f"Collected {len(self.street_ends)} street ends")
         
     def find_near_water(self):
@@ -105,9 +131,11 @@ class StreetEndFinder:
         # Convert to projected CRS for accurate distance measurements
         river_geom_proj = gpd.GeoSeries([river_geom], crs='EPSG:4326').to_crs('EPSG:3857')[0]
         
-        for i, point in enumerate(self.street_ends):
+        for i, point_data in enumerate(self.street_ends):
             if i % 1000 == 0:
                 self.logger.info(f"Processed {i}/{len(self.street_ends)} points...")
+            
+            point = point_data['geometry']  # Get the Point geometry
             
             # Convert point to projected CRS
             point_proj = gpd.GeoSeries([point], crs='EPSG:4326').to_crs('EPSG:3857')[0]
@@ -126,8 +154,11 @@ class StreetEndFinder:
                     # Create a new Point with properties
                     point_with_props = {
                         'type': 'Feature',
-                        'geometry': point,  # Original WGS84 point for storage
-                        'properties': {'distance_to_water': round(float(distance), 2)}
+                        'geometry': point,
+                        'properties': {
+                            **point_data['properties'],
+                            'distance_to_water': round(float(distance), 2)
+                        }
                     }
                     self.near_water.append(point_with_props)
                     seen_points.append(point_proj)  # Store projected point for distance checks

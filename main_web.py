@@ -48,9 +48,9 @@ def main():
         geojson_file = finder.process_location(location)
         
         # Enrich data (if not skipped)
-        if not args.skip_enrich:
-            enricher = LocationEnricher()
-            enricher.process_locations(geojson_file)
+        # if not args.skip_enrich:
+        #     enricher = LocationEnricher()
+        #     enricher.process_locations(geojson_file)
         
         # Render map (if not skipped)
         if not args.skip_render:

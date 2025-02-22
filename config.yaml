@@ -1,0 +1,6 @@
+analysis:
+  buffer_distance: 100
+  deduplication_distance: 25
+  threshold_distance: 13
+locations:
+- Skokie, USA

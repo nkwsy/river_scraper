@@ -164,9 +164,9 @@ class GlobalCityAnalyzer:
             self.logger.info(f"Rendering map for {city_name}")
             start = time.time()
             renderer = StreetEndRenderer(
-                str(geojson_path),
-                city_name,
                 summary_file=str(summary_path)
+                city_name,
+                
             )
             map_html = city_dir / 'map.html'
             renderer.render(str(map_html))

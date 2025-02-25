@@ -696,7 +696,8 @@ class LocationEnricher:
         # Update feature properties with results
         for feature, result in zip(features, all_results):
             feature['properties'].update(result)
-
+        geojson['properties']['total_street_ends'] = len(features)
+        geojson['properties']['analysis_date'] = datetime.now().isoformat()
         self.logger.info(f"Processing complete. Cache hits: {self.cache_hits}")
         self._save_summary(geojson)
         return geojson

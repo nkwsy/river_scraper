@@ -150,6 +150,7 @@ class GlobalCityAnalyzer:
                     batch_size=10,
                     cache_osm_data=True,
                     concurrency_limit=5,
+                    use_multithreading=True
                 )
                 enricher = LocationEnricher(config)
                 # Use asyncio.run to run the async method in a sync context
@@ -831,10 +832,10 @@ if __name__ == "__main__":
         enrich_data=True, 
         update_existing=False,
         use_multithreading=True,  # Enable multithreading
-        max_workers=4
+        max_workers=14
     )
     results_mt = analyzer_stage2_mt.run_global_analysis_stage2(
-        num_cities=200, use_multithreading=True
+        target_cities=['Chicago', 'Milwaukee'], use_multithreading=True
     )
 
     # Stage 3: Generate report (always runs sequentially)

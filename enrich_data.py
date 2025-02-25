@@ -2,16 +2,18 @@ import os
 import json
 import asyncio
 import time
+from typing import Dict, Optional, List, Tuple
+from dataclasses import dataclass
+from collections import defaultdict
 
 from dotenv import load_dotenv
 import aiohttp
 import pandas as pd
 import geopandas as gpd
 from shapely.geometry import Point, box
+from shapely.ops import unary_union
 from datetime import datetime
-from typing import Dict, Optional, List
-from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
 from utils.logging_config import setup_logger
 from utils.osmnx_load import get_ox
@@ -27,6 +29,10 @@ class LocationConfig:
     max_locations: int
     save_images: bool
     save_detailed_json: bool
+    batch_size: int = 10  # Process locations in batches
+    cache_osm_data: bool = True  # Enable OSM data caching
+    concurrency_limit: int = 5  # Number of concurrent location processings
+
 
 class LocationEnricher:
     def __init__(self, config: LocationConfig):
@@ -36,26 +42,37 @@ class LocationEnricher:
         self._setup_dirs()
         self.logger = setup_logger('location_enricher')
         
+        # Cache for OSM data to avoid redundant queries
+        self.osm_cache = {}
+        self.cache_hits = 0
+        
     def _setup_dirs(self):
         """Create necessary directories with proper permissions"""
         os.makedirs(self.config.output_dir, exist_ok=True)
         os.makedirs(os.path.join(self.config.output_dir, 'images'), exist_ok=True)
         os.makedirs(os.path.join(self.config.output_dir, 'data'), exist_ok=True)
+        os.makedirs(os.path.join(self.config.output_dir, 'cache'), exist_ok=True)
 
     async def _init_session(self):
         """Initialize aiohttp session for concurrent requests"""
         if not self.session:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=self.config.concurrency_limit)
+            )
 
     async def download_image(self, url: str, filename: str) -> Optional[str]:
         """Download image asynchronously"""
         try:
+            cache_path = os.path.join(self.config.output_dir, 'images', filename)
+            # Skip if already exists
+            if os.path.exists(cache_path):
+                return cache_path
+                
             async with self.session.get(url) as response:
                 if response.status == 200:
-                    path = os.path.join(self.config.output_dir, 'images', filename)
-                    with open(path, 'wb') as f:
+                    with open(cache_path, 'wb') as f:
                         f.write(await response.read())
-                    return path
+                    return cache_path
         except Exception as e:
             self.logger.error(f"Image download error: {str(e)}")
         return None
@@ -81,6 +98,14 @@ class LocationEnricher:
 
     def calculate_population_metrics(self, buildings_gdf: gpd.GeoDataFrame, buffer_area: float) -> Dict:
         """Calculate advanced population and density metrics"""
+        if buildings_gdf.empty:
+            return {
+                'population_density': 0,
+                'total_floor_area': 0,
+                'building_count': 0,
+                'avg_building_density': 0
+            }
+            
         building_types = {
             'residential': {'floors': 2, 'density': 40},
             'apartments': {'floors': 4, 'density': 30},
@@ -90,7 +115,10 @@ class LocationEnricher:
         }
 
         def get_building_metrics(row):
-            btype = row['building']
+            btype = row.get('building', 'default')
+            if not isinstance(btype, str):
+                btype = 'default'
+                
             metrics = building_types.get(btype, building_types['default'])
             area = row.geometry.area
             return {
@@ -102,7 +130,7 @@ class LocationEnricher:
         building_metrics = buildings_gdf.apply(get_building_metrics, axis=1)
         
         total_floor_area = sum(m['area'] * m['floors'] for m in building_metrics)
-        avg_density = sum(m['density'] for m in building_metrics) / len(building_metrics)
+        avg_density = sum(m['density'] for m in building_metrics) / max(1, len(building_metrics))
         
         estimated_population = total_floor_area / avg_density
         population_density = estimated_population / (buffer_area / 1000000)
@@ -117,19 +145,30 @@ class LocationEnricher:
     def calculate_greenspace_score(self, green_areas: gpd.GeoDataFrame, buffer_area: float) -> Dict:
         """Calculate greenspace score from nearby areas"""
         try:
+            if green_areas.empty:
+                return {
+                    'park_count': 0,
+                    'nature_reserve_count': 0,
+                    'garden_count': 0,
+                    'green_space_count': 0,
+                    'total_green_areas': 0,
+                    'green_percentage': 0,
+                    'nearest_park_distance': -1,
+                    'park_distance_score': 0,
+                    'greenspace_score': 0
+                }
+            
             # Ensure we have the required columns, with safe defaults
             if 'leisure' not in green_areas.columns:
-                self.logger.warning("No 'leisure' column found in green_areas, adding empty column")
                 green_areas['leisure'] = None
             
             if 'landuse' not in green_areas.columns:
-                self.logger.warning("No 'landuse' column found in green_areas, adding empty column")
                 green_areas['landuse'] = None
 
             # Filter for specific green space types
-            parks = green_areas[green_areas['leisure'].fillna(0).str.lower() == 'park']
-            nature_reserves = green_areas[green_areas['leisure'].fillna(0).str.lower() == 'nature_reserve']
-            gardens = green_areas[green_areas['leisure'].fillna(0).str.lower() == 'garden']
+            parks = green_areas[green_areas['leisure'].fillna('').astype(str).str.lower() == 'park']
+            nature_reserves = green_areas[green_areas['leisure'].fillna('').astype(str).str.lower() == 'nature_reserve']
+            gardens = green_areas[green_areas['leisure'].fillna('').astype(str).str.lower() == 'garden']
             
             # Calculate total area of specific green spaces only
             total_green_area = (
@@ -140,25 +179,21 @@ class LocationEnricher:
             green_percentage = (total_green_area / buffer_area) * 100  # Convert to percentage
 
             # Calculate average distance to nearest park (in meters)
-            # Buffer radius is typically 1km = 1000m
             if not parks.empty:
-                # Convert to projected CRS for accurate distance calculation
                 parks_proj = parks.to_crs('EPSG:3857')
                 center_point = Point(0, 0)  # Buffer is centered at 0,0
                 center_gdf = gpd.GeoDataFrame(geometry=[center_point], crs='EPSG:4326').to_crs('EPSG:3857')
                 distances = parks_proj.geometry.distance(center_gdf.geometry.iloc[0])
                 nearest_park_distance = distances.min()
                 
-                # Score based on walking distance (higher score for closer parks)
-                # Assumes 5 minutes walking = ~400m
-                # Max score (100) for parks within 400m
-                # Min score (0) for parks at or beyond 1000m
+                # Score based on walking distance
                 distance_score = max(0, min(100, (1000 - nearest_park_distance) / 6))
             else:
+                nearest_park_distance = -1
                 distance_score = 0
 
             # Additional filtering for other counts
-            green_spaces = green_areas[green_areas['landuse'].fillna(0).str.lower().isin(['grass', 'recreation_ground'])]
+            green_spaces = green_areas[green_areas['landuse'].fillna('').astype(str).str.lower().isin(['grass', 'recreation_ground'])]
 
             return {
                 'park_count': len(parks),
@@ -167,7 +202,7 @@ class LocationEnricher:
                 'green_space_count': len(green_spaces),
                 'total_green_areas': len(green_areas),
                 'green_percentage': round(green_percentage, 2),
-                'nearest_park_distance': round(nearest_park_distance if 'nearest_park_distance' in locals() else -1, 2),
+                'nearest_park_distance': round(nearest_park_distance, 2),
                 'park_distance_score': round(distance_score, 2),
                 'greenspace_score': round((green_percentage + distance_score) / 2, 2)  # Combined score
             }
@@ -182,14 +217,20 @@ class LocationEnricher:
                 'greenspace_score': 0
             }
 
-    def _get_waterway_info(self, point: Point, buffer_area=None) -> Dict:
-        """
-        Get basic information about the nearest waterway (name, type, width),
-        prioritizing named water features.
-        """
+    def _get_waterway_info(self, point: Point, fetch_radius_km=0.5) -> Dict:
+        """Get waterway info with improved error handling and caching"""
         try:
-            # Create a buffer for water features (500m)
-            water_buffer = point.buffer(0.25 / 111)  # 0.5km converted to degrees
+            # Use a stable cache key based on rounded coordinates (for nearby points)
+            lat, lon = point.y, point.x
+            cache_key = f"water_{round(lat, 4)}_{round(lon, 4)}"
+            
+            if cache_key in self.osm_cache:
+                self.cache_hits += 1
+                return self.osm_cache[cache_key]
+            
+            # Create a simplified buffer for water features
+            buffer_degrees = fetch_radius_km / 111  # Convert km to approximate degrees
+            water_buffer = point.buffer(buffer_degrees).simplify(0.0001)
             
             # More inclusive water feature tags
             waterway_tags = {
@@ -198,22 +239,25 @@ class LocationEnricher:
                 'water': True
             }
             
-            logger.info(f"Searching for water features at {point.coords[0]}")
-            
             try:
                 water_features = ox.features_from_polygon(water_buffer, tags=waterway_tags)
             except Exception as e:
-                logger.warning(f"First attempt failed, trying with simplified buffer: {str(e)}")
-                water_buffer = water_buffer.simplify(0.0001)
-                water_features = ox.features_from_polygon(water_buffer, tags=waterway_tags)
-            
-            if water_features.empty:
-                logger.warning(f"No waterway features found at {point.coords[0]}")
+                logger.warning(f"Error fetching water features: {str(e)}")
                 return {
                     'name': 'Unknown',
                     'type': 'Unknown',
                     'width': 'Unknown'
                 }
+            
+            if water_features.empty:
+                logger.warning(f"No waterway features found at {point.coords[0]}")
+                result = {
+                    'name': 'Unknown',
+                    'type': 'Unknown',
+                    'width': 'Unknown'
+                }
+                self.osm_cache[cache_key] = result
+                return result
             
             # Convert to projected CRS for accurate distance calculation
             water_features = water_features.to_crs('EPSG:3857')
@@ -239,19 +283,18 @@ class LocationEnricher:
                     lambda x: any(
                         isinstance(v, str) and len(v.strip()) > 0 
                         for v in [x.get('name'), x.get('waterway'), x.get('water')]
+                        if v is not None
                     ),
                     axis=1
                 )
             ]
             
             if not named_features.empty:
-                logger.info("Found named water feature")
                 # Use the nearest named feature
                 named_distances = distances[named_features.index]
                 min_named_idx = named_distances.astype(float).idxmin()
                 feature_to_use = water_features.loc[min_named_idx]
             else:
-                logger.info("No named features found, using nearest water feature")
                 feature_to_use = nearest_feature
             
             # Determine the water feature type
@@ -281,7 +324,8 @@ class LocationEnricher:
                 'width': width
             }
             
-            logger.info(f"Found waterway: {waterway_info}")
+            # Cache the result
+            self.osm_cache[cache_key] = waterway_info
             return waterway_info
                 
         except Exception as e:
@@ -292,39 +336,116 @@ class LocationEnricher:
                 'width': 'Unknown'
             }
 
+    def _get_osm_data_cached(self, buffer_area, lat, lon) -> Dict:
+        """Get OSM data for buildings and green areas with caching"""
+        # Use a cache key based on the center of the buffer area
+        cache_key = f"osm_{round(lat, 3)}_{round(lon, 3)}_{self.config.radius_km}"
+        
+        if cache_key in self.osm_cache and self.config.cache_osm_data:
+            self.cache_hits += 1
+            return self.osm_cache[cache_key]
+        
+        # Simplify the buffer geometry for OSM querying
+        simplified_buffer = buffer_area.simplify(0.0001)
+        
+        try:
+            # Get building data
+            building_tags = {'building': True}
+            buildings = ox.features_from_polygon(simplified_buffer, tags=building_tags)
+            
+            # Get green areas
+            green_tags = {
+                'leisure': ['park', 'garden', 'nature_reserve'],
+                'landuse': ['grass', 'forest', 'recreation_ground'],
+                'natural': ['wood', 'grassland', 'water']
+            }
+            green_areas = ox.features_from_polygon(simplified_buffer, tags=green_tags)
+            
+            # Convert to projected CRS for accurate area calculation
+            buildings = buildings.to_crs('EPSG:3857') if not buildings.empty else gpd.GeoDataFrame(geometry=[], crs='EPSG:3857')
+            green_areas = green_areas.to_crs('EPSG:3857') if not green_areas.empty else gpd.GeoDataFrame(geometry=[], crs='EPSG:3857')
+            buffer_gdf = gpd.GeoDataFrame(geometry=[buffer_area], crs='EPSG:4326').to_crs('EPSG:3857')
+            
+            result = {
+                'buildings': buildings,
+                'green_areas': green_areas,
+                'buffer_area': buffer_gdf.geometry.area[0]
+            }
+            
+            # Cache the result
+            if self.config.cache_osm_data:
+                self.osm_cache[cache_key] = result
+                
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching OSM data: {str(e)}")
+            # Return empty data frames
+            empty_gdf = gpd.GeoDataFrame(geometry=[], crs='EPSG:3857')
+            buffer_gdf = gpd.GeoDataFrame(geometry=[buffer_area], crs='EPSG:4326').to_crs('EPSG:3857')
+            
+            result = {
+                'buildings': empty_gdf,
+                'green_areas': empty_gdf,
+                'buffer_area': buffer_gdf.geometry.area[0]
+            }
+            
+            return result
+
+    def _calculate_final_score(
+        self,
+        population_metrics: Dict,
+        greenspace_score: Dict
+    ) -> float:
+        """
+        Calculate need-based score. Higher scores indicate greater need for waterfront access.
+        Areas with high population density and low greenspace get higher scores.
+        """
+        # Normalize population density (0-100)
+        pop_density_score = min(100, (population_metrics['population_density'] / 10000) * 100)
+        
+        # Invert greenspace score (0-100)
+        green_need_score = 100 - greenspace_score['greenspace_score']
+        
+        # Calculate combined need score
+        weights = {
+            'population': 0.6,
+            'greenspace_need': 0.4
+        }
+        
+        need_score = (
+            pop_density_score * weights['population'] +
+            green_need_score * weights['greenspace_need']
+        )
+        
+        # Add bonus points for very high density + very low greenspace combinations
+        if pop_density_score > 80 and green_need_score > 80:
+            need_score *= 1.2  # 20% bonus for high-need areas
+        
+        return round(min(100, need_score), 2)  # Cap at 100
+
     async def enrich_location(self, lat: float, lon: float, location_id: str) -> Dict:
         """Enrich location data with concurrent processing"""
         start_time = time.time()
-        self.logger.info(f"Starting enrichment for location {location_id}")
-        
-        await self._init_session()
         
         point = Point(lon, lat)
         buffer_radius = self.config.radius_km * 1000
-        buffer_area = point.buffer(buffer_radius / 111000)
+        buffer_area = point.buffer(buffer_radius / 111000)  # Convert to degrees approximately
 
-        # Log each major step
-        self.logger.info(f"Fetching images for location {location_id}")
-        images_start = time.time()
+        # Launch tasks concurrently
         images_task = self.get_location_images(lat, lon, location_id)
         
-        self.logger.info(f"Fetching OSM data for location {location_id}")
-        osm_start = time.time()
+        # Get OSM data in a thread pool
         with ThreadPoolExecutor() as executor:
-            osm_future = executor.submit(self._get_osm_data, buffer_area)
-            waterway_future = executor.submit(self._get_waterway_info, point, buffer_area)
-
-        images = await images_task
-        self.logger.info(f"Images fetched in {time.time() - images_start:.2f} seconds")
+            osm_future = executor.submit(self._get_osm_data_cached, buffer_area, lat, lon)
+            waterway_future = executor.submit(self._get_waterway_info, point)
         
+        # Wait for all tasks to complete
+        images = await images_task
         osm_data = osm_future.result()
         waterway_info = waterway_future.result()
-        self.logger.info(f"OSM data fetched in {time.time() - osm_start:.2f} seconds")
-
-        # Calculate metrics
-        self.logger.info(f"Calculating metrics for location {location_id}")
-        metrics_start = time.time()
         
+        # Calculate metrics
         population_metrics = self.calculate_population_metrics(
             osm_data['buildings'],
             osm_data['buffer_area']
@@ -334,11 +455,9 @@ class LocationEnricher:
             osm_data['green_areas'],
             osm_data['buffer_area']
         )
-        
-        self.logger.info(f"Metrics calculated in {time.time() - metrics_start:.2f} seconds")
 
         total_time = time.time() - start_time
-        self.logger.info(f"Location {location_id} enriched in {total_time:.2f} seconds")
+        self.logger.info(f"Location {location_id} enriched in {total_time:.2f} seconds (cache hits: {self.cache_hits})")
 
         data = {
             'location_id': location_id,
@@ -359,102 +478,104 @@ class LocationEnricher:
 
         return data
 
-    def _calculate_final_score(
-        self,
-        population_metrics: Dict,
-        greenspace_score: Dict
-    ) -> float:
-        """
-        Calculate need-based score. Higher scores indicate greater need for waterfront access.
-        Areas with high population density and low greenspace get higher scores.
-        """
-        # Normalize population density (0-100)
-        # Assuming anything above 150 people per sq km is high density
-        pop_density_score = min(100, (population_metrics['population_density'] / 10000) * 100)
+    def _group_locations_by_proximity(self, features) -> List[List[Dict]]:
+        """Group locations that are close to each other to optimize OSM queries"""
+        # Convert km to approximate degrees (at the equator)
+        proximity_threshold = self.config.radius_km * 2 / 111
         
-        # Invert greenspace score (0-100)
-        # Less greenspace = higher need score
-        green_need_score = 100 - greenspace_score['greenspace_score']
+        # Init groups
+        groups = []
+        used_indices = set()
         
-        # Calculate combined need score
-        # Higher weight on population density as it indicates more people would benefit
-        weights = {
-            'population': 0.6,  # Increased from 0.4
-            'greenspace_need': 0.4  # Decreased from 0.6
-        }
-        
-        need_score = (
-            pop_density_score * weights['population'] +
-            green_need_score * weights['greenspace_need']
-        )
-        
-        # Add bonus points for very high density + very low greenspace combinations
-        if pop_density_score > 80 and green_need_score > 80:
-            need_score *= 1.2  # 20% bonus for high-need areas
-        
-        # Log the scoring components for debugging
-        self.logger.info(
-            f"Location scoring - "
-            f"Population Density Score: {pop_density_score:.2f}, "
-            f"Green Need Score: {green_need_score:.2f}, "
-            f"Final Need Score: {need_score:.2f}"
-        )
-        
-        return round(min(100, need_score), 2)  # Cap at 100
+        for i, feature in enumerate(features):
+            if i in used_indices:
+                continue
+                
+            lon1, lat1 = feature['geometry']['coordinates']
+            point1 = Point(lon1, lat1)
+            
+            # Start a new group
+            current_group = [feature]
+            used_indices.add(i)
+            
+            # Find nearby points
+            for j, other_feature in enumerate(features):
+                if j in used_indices or i == j:
+                    continue
+                    
+                lon2, lat2 = other_feature['geometry']['coordinates']
+                point2 = Point(lon2, lat2)
+                
+                # If points are close, add to current group
+                distance = point1.distance(point2)
+                if distance < proximity_threshold:
+                    current_group.append(other_feature)
+                    used_indices.add(j)
+                    
+            groups.append(current_group)
+            
+        return groups
+
+    async def process_group(self, group, start_idx):
+        """Process a group of nearby locations"""
+        tasks = []
+        for i, feature in enumerate(group):
+            lon, lat = feature['geometry']['coordinates']
+            location_id = str(start_idx + i)
+            tasks.append(self.enrich_location(lat, lon, location_id))
+            
+        results = await asyncio.gather(*tasks)
+        return results
 
     async def process_locations(self, geojson_file: str) -> Dict:
-        """Process locations with concurrent execution"""
+        """Process locations with batch processing for nearby locations"""
         with open(geojson_file) as f:
             geojson = json.load(f)
 
         features = geojson['features'][:self.config.max_locations] if self.config.max_locations > 0 else geojson['features']
+        self.logger.info(f"Processing {len(features)} locations from {geojson_file}")
         
-        # Create a semaphore to limit concurrent operations
-        sem = asyncio.Semaphore(20)  # Adjust this number based on your needs (e.g., 5-20)
-
-        async def process_feature(feature, idx):
-            async with sem:  # This ensures only N operations run at once
-                lon, lat = feature['geometry']['coordinates']
-                return await self.enrich_location(lat, lon, str(idx))
-
-        # Create tasks with controlled concurrency
-        tasks = [
-            process_feature(feature, idx)
-            for idx, feature in enumerate(features)
-        ]
-
-        results = await asyncio.gather(*tasks)
+        # Reset cache statistics
+        self.cache_hits = 0
         
-        for feature, result in zip(features, results):
+        # Initialize session
+        await self._init_session()
+        
+        # Group nearby locations for batch processing
+        location_groups = self._group_locations_by_proximity(features)
+        self.logger.info(f"Grouped {len(features)} locations into {len(location_groups)} proximity groups")
+        
+        # Process groups with controlled concurrency
+        results = []
+        sem = asyncio.Semaphore(self.config.concurrency_limit)
+        
+        async def process_group_with_semaphore(group, start_idx):
+            async with sem:
+                return await self.process_group(group, start_idx)
+        
+        # Create tasks for each group
+        tasks = []
+        location_index = 0
+        
+        for group in location_groups:
+            tasks.append(process_group_with_semaphore(group, location_index))
+            location_index += len(group)
+        
+        # Execute all tasks
+        group_results = await asyncio.gather(*tasks)
+        
+        # Flatten results
+        all_results = []
+        for group_result in group_results:
+            all_results.extend(group_result)
+        
+        # Update feature properties
+        for feature, result in zip(features, all_results):
             feature['properties'].update(result)
 
+        self.logger.info(f"Processing complete. Cache hits: {self.cache_hits}")
         self._save_summary(geojson)
         return geojson
-
-    def _get_osm_data(self, buffer_area) -> Dict:
-        """Get OSM data for buildings and green areas"""
-        # Get building data
-        building_tags = {'building': True}
-        buildings = ox.features_from_polygon(buffer_area, tags=building_tags)
-        
-        # Get green areas
-        green_tags = {
-            'leisure': ['park', 'garden', 'nature_reserve'],
-            'landuse': ['grass', 'forest', 'recreation_ground'],
-            'natural': ['wood', 'grassland', 'water']
-        }
-        green_areas = ox.features_from_polygon(buffer_area, tags=green_tags)
-        
-        # Convert to projected CRS for accurate area calculation
-        buildings = buildings.to_crs('EPSG:3857') if not buildings.empty else buildings
-        green_areas = green_areas.to_crs('EPSG:3857') if not green_areas.empty else green_areas
-        buffer_gdf = gpd.GeoDataFrame(geometry=[buffer_area], crs='EPSG:4326').to_crs('EPSG:3857')
-        
-        return {
-            'buildings': buildings,
-            'green_areas': green_areas,
-            'buffer_area': buffer_gdf.geometry.area[0]
-        }
 
     def _save_location_data(self, data: Dict, location_id: str):
         """Save location data with proper error handling"""
@@ -482,12 +603,15 @@ class LocationEnricher:
 if __name__ == "__main__":
     config = LocationConfig(
         radius_km=1.0,
-        output_dir="location_data",
+        output_dir="location_data/US/Chicago",
         max_locations=-1,
-        save_images=True,
-        save_detailed_json=True
+        save_images=False,
+        save_detailed_json=True,
+        batch_size=10,
+        cache_osm_data=True,
+        concurrency_limit=1
     )
 
     enricher = LocationEnricher(config)
-    asyncio.run(enricher.process_locations("global_analysis/US/Skokie/street_ends.geojson"))
-    enricher.cleanup()
+    asyncio.run(enricher.process_locations("location_data/US/Chicago/street_ends.geojson"))
+    asyncio.run(enricher.cleanup())

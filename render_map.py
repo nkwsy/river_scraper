@@ -257,8 +257,8 @@ class StreetEndRenderer:
 # Example usage:
 if __name__ == "__main__":
     # Basic usage
-    renderer = StreetEndRenderer('global_analysis/US/Chicago/summary.json', "Chicago, US")
-    renderer.render('global_analysis/US/Chicago/map.html')
+    renderer = StreetEndRenderer('global_analysis/US/Milwaukee/summary.json', "Milwaukee, US")
+    renderer.render('global_analysis/US/Milwaukee/map.html')
 	
     # Custom usage
     # renderer = StreetEndRenderer(

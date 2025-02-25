@@ -927,7 +927,7 @@ if __name__ == "__main__":
         # When running directly, just test data loading
         print("Testing data loading from global_analysis directory...")
         try:
-            df, stats = load_summary_data("global_analysis")
+            df, stats = load_summary_data("\TRUENAS\media\research\cities\global_analysis")
             if df is not None and stats is not None:
                 print(f"Successfully loaded data for {stats['total_cities_analyzed']} cities with {stats['total_street_ends_found']} street ends.")
                 print("\nTo view the dashboard, run: streamlit run street_ends_dashboard.py")

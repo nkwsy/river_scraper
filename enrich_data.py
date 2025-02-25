@@ -78,6 +78,7 @@ def get_city_info(city_name: str, country_code: str = None) -> Dict:
         # Construct result dictionary
         result = {
             'name': city_info['name'],
+            'city_name': f"{city_info['name']}, {city_info['country_code']}",
             'latitude': float(city_info['latitude']),
             'longitude': float(city_info['longitude']),
             'population': int(city_info['population']),
@@ -89,6 +90,7 @@ def get_city_info(city_name: str, country_code: str = None) -> Dict:
                 'admin3': city_info['admin3_code'],
                 'admin4': city_info['admin4_code']
             },
+            'analysis_date': datetime.now().isoformat(),
             'geometry': geometry
         }
         
@@ -696,8 +698,13 @@ class LocationEnricher:
         # Update feature properties with results
         for feature, result in zip(features, all_results):
             feature['properties'].update(result)
-        geojson['properties']['total_street_ends'] = len(features)
-        geojson['properties']['analysis_date'] = datetime.now().isoformat()
+        # Preserve existing properties while adding new ones
+        existing_props = geojson['properties'].copy()
+        geojson['properties'] = {
+            **existing_props,
+            'total_street_ends': len(features),
+            'analysis_date': datetime.now().isoformat()
+        }
         self.logger.info(f"Processing complete. Cache hits: {self.cache_hits}")
         self._save_summary(geojson)
         return geojson
@@ -730,7 +737,7 @@ if __name__ == "__main__":
     config = LocationConfig(
         radius_km=1.0,
         output_dir="global_analysis/US/Chicago",
-        max_locations=50,
+        max_locations=2,
         save_images=False,
         save_detailed_json=True,
         batch_size=10,

@@ -164,8 +164,8 @@ class GlobalCityAnalyzer:
             self.logger.info(f"Rendering map for {city_name}")
             start = time.time()
             renderer = StreetEndRenderer(
-                summary_file=str(summary_path)
-                city_name,
+                summary_file=str(summary_path),
+                city_name=city_name,
                 
             )
             map_html = city_dir / 'map.html'

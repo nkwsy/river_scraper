@@ -149,7 +149,7 @@ class GlobalCityAnalyzer:
                     save_detailed_json=True,
                     batch_size=10,
                     cache_osm_data=True,
-                    concurrency_limit=5,
+                    concurrency_limit=8,
                     use_multithreading=True
                 )
                 enricher = LocationEnricher(config)

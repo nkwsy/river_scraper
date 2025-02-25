@@ -44,6 +44,7 @@ class GlobalCityAnalyzer:
         self.start_time = None
         self.max_workers = kwargs.get('max_workers', 4)
         self.update_existing = kwargs.get('update_existing', False)
+        self.use_multithreading = kwargs.get('use_multithreading', False)
     def get_top_cities(self, num_cities=1000):
         """Get list of top 1000 cities by population"""
         try:
@@ -145,7 +146,10 @@ class GlobalCityAnalyzer:
                     output_dir=city_dir,
                     max_locations=-1,
                     save_images=False,
-                    save_detailed_json=True
+                    save_detailed_json=True,
+                    batch_size=10,
+                    cache_osm_data=True,
+                    concurrency_limit=5,
                 )
                 enricher = LocationEnricher(config)
                 # Use asyncio.run to run the async method in a sync context
@@ -202,14 +206,26 @@ class GlobalCityAnalyzer:
             return None
 
     @log_timing
-    def run_global_analysis_stage1(self, num_cities=10, target_cities=None, max_workers=4):
+    def run_global_analysis_stage1(self, num_cities=10, target_cities=None, max_workers=4, use_multithreading=None):
         """
-        Runs only Stage 1 for multiple cities using concurrent processing:
+        Runs only Stage 1 for multiple cities:
         1) Get top cities or user-specified target cities
         2) For each city, generate street_ends.geojson
+        
+        Args:
+            num_cities: Number of cities to process
+            target_cities: List of specific cities to target
+            max_workers: Number of parallel workers (only used if use_multithreading=True)
+            use_multithreading: Whether to use parallel processing (defaults to self.use_multithreading)
         """
         self.start_time = time.time()
-        self.logger.warning(f"Starting Global Analysis Stage 1 with {num_cities} cities using {max_workers} workers")
+        
+        # Determine whether to use multithreading
+        if use_multithreading is None:
+            use_multithreading = self.use_multithreading
+            
+        workers_msg = f"using {max_workers} workers" if use_multithreading else "sequentially"
+        self.logger.warning(f"Starting Global Analysis Stage 1 with {num_cities} cities {workers_msg}")
         self.logger.warning(f"Target cities: {target_cities if target_cities else 'Using top cities by population'}")
         
         if target_cities is None:
@@ -222,25 +238,41 @@ class GlobalCityAnalyzer:
             return
 
         results = []
-        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-            # Create a dictionary of future to city name for better error reporting
-            future_to_city = {
-                executor.submit(self.analyze_city_stage1, city): city['name'] 
-                for _, city in cities.head(num_cities).iterrows()
-            }
+        
+        # Use multithreading if requested
+        if use_multithreading:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                # Create a dictionary of future to city name for better error reporting
+                future_to_city = {
+                    executor.submit(self.analyze_city_stage1, city): city['name'] 
+                    for _, city in cities.head(num_cities).iterrows()
+                }
 
-            # Process completed futures as they come in
-            for future in tqdm(as_completed(future_to_city), 
-                             total=len(future_to_city), 
-                             desc="Processing cities"):
-                city_name = future_to_city[future]
+                # Process completed futures as they come in
+                for future in tqdm(as_completed(future_to_city), 
+                                 total=len(future_to_city), 
+                                 desc="Processing cities"):
+                    city_name = future_to_city[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            results.append(result)
+                            self.logger.warning(f"Successfully processed {city_name}")
+                    except Exception as e:
+                        self.logger.error(f"City processing failed for {city_name}: {str(e)}", 
+                                        exc_info=True)
+        else:
+            # Process cities sequentially
+            for _, city in tqdm(cities.head(num_cities).iterrows(), 
+                              total=min(num_cities, len(cities)), 
+                              desc="Processing cities"):
                 try:
-                    result = future.result()
+                    result = self.analyze_city_stage1(city)
                     if result:
                         results.append(result)
-                        self.logger.warning(f"Successfully processed {city_name}")
+                        self.logger.warning(f"Successfully processed {city['name']}")
                 except Exception as e:
-                    self.logger.error(f"City processing failed for {city_name}: {str(e)}", 
+                    self.logger.error(f"City processing failed for {city['name']}: {str(e)}", 
                                     exc_info=True)
 
         # Save partial results
@@ -251,10 +283,24 @@ class GlobalCityAnalyzer:
         return results
 
     @log_timing
-    def run_global_analysis_stage2(self, num_cities=10, target_cities=None, max_workers=4):
-        """Process multiple cities using ProcessPoolExecutor"""
+    def run_global_analysis_stage2(self, num_cities=10, target_cities=None, max_workers=4, use_multithreading=None):
+        """
+        Process multiple cities for Stage 2 (enrichment and map generation)
+        
+        Args:
+            num_cities: Number of cities to process
+            target_cities: List of specific cities to target
+            max_workers: Number of parallel workers (only used if use_multithreading=True)
+            use_multithreading: Whether to use parallel processing (defaults to self.use_multithreading)
+        """
         self.start_time = time.time()
-        self.logger.info(f"Starting Global Analysis Stage 2 with {num_cities} cities using {max_workers} workers")
+        
+        # Determine whether to use multithreading
+        if use_multithreading is None:
+            use_multithreading = self.use_multithreading
+            
+        workers_msg = f"using {max_workers} workers" if use_multithreading else "sequentially"
+        self.logger.info(f"Starting Global Analysis Stage 2 with {num_cities} cities {workers_msg}")
         self.logger.info(f"Target cities: {target_cities if target_cities else 'Using top cities by population'}")
         
         if target_cities is None:
@@ -267,25 +313,41 @@ class GlobalCityAnalyzer:
             return
 
         results = []
-        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-            # Create a dictionary of future to city name for better error reporting
-            future_to_city = {
-                executor.submit(self.analyze_city_stage2, city): city['name'] 
-                for _, city in cities.head(num_cities).iterrows()
-            }
+        
+        # Use multithreading if requested
+        if use_multithreading:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                # Create a dictionary of future to city name for better error reporting
+                future_to_city = {
+                    executor.submit(self.analyze_city_stage2, city): city['name'] 
+                    for _, city in cities.head(num_cities).iterrows()
+                }
 
-            # Process completed futures as they come in
-            for future in tqdm(as_completed(future_to_city), 
-                             total=len(future_to_city), 
-                             desc="Processing cities"):
-                city_name = future_to_city[future]
+                # Process completed futures as they come in
+                for future in tqdm(as_completed(future_to_city), 
+                                 total=len(future_to_city), 
+                                 desc="Processing cities"):
+                    city_name = future_to_city[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            results.append(result)
+                            self.logger.warning(f"Successfully processed {city_name}")
+                    except Exception as e:
+                        self.logger.error(f"City processing failed for {city_name}: {str(e)}", 
+                                        exc_info=True)
+        else:
+            # Process cities sequentially
+            for _, city in tqdm(cities.head(num_cities).iterrows(), 
+                              total=min(num_cities, len(cities)), 
+                              desc="Processing cities"):
                 try:
-                    result = future.result()
+                    result = self.analyze_city_stage2(city)
                     if result:
                         results.append(result)
-                        self.logger.warning(f"Successfully processed {city_name}")
+                        self.logger.warning(f"Successfully processed {city['name']}")
                 except Exception as e:
-                    self.logger.error(f"City processing failed for {city_name}: {str(e)}", 
+                    self.logger.error(f"City processing failed for {city['name']}: {str(e)}", 
                                     exc_info=True)
 
         # Save final results
@@ -400,13 +462,15 @@ class GlobalCityAnalyzer:
                         <h1>Global Street Ends Analysis</h1>
                         <p>Analysis Date: {stats['analysis_date']}</p>
                         <p><a href="{map_link}" target="_blank">View All Street Ends on Google Maps</a></p>
+                        
                         <h2>Summary Statistics</h2>
                         <ul>
                             <li>Total Cities Analyzed: {stats['total_cities_analyzed']}</li>
                             <li>Total Street Ends Found: {stats['total_street_ends_found']}</li>
                             <li>Average Street Ends per City: {stats['average_street_ends_per_city']:.2f}</li>
                         </ul>
-                        <h2>Top 10 Cities by Street Ends</h2>
+                        
+                        <h2>Top Cities by Street Ends</h2>
                         <table class="table">
                             <thead>
                                 <tr>
@@ -414,11 +478,12 @@ class GlobalCityAnalyzer:
                                     <th>Country</th>
                                     <th>Population</th>
                                     <th>Street Ends</th>
-                                    <th>Action</th>
+                                    <th>Map</th>
+                                    <th>Data</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {self._generate_table_rows(stats['cities_by_street_ends'])}
+                                {self._generate_table_rows(df)}
                             </tbody>
                         </table>
                     </div>
@@ -432,30 +497,70 @@ class GlobalCityAnalyzer:
         except Exception as e:
             logging.error(f"Error generating report: {str(e)}")
 
-    def _generate_table_rows(self, cities_data):
-        """Generate HTML table rows from city data"""
+    def _generate_table_rows(self, df: pd.DataFrame) -> str:
+        """Generate HTML table rows from DataFrame"""
         rows = ""
-        for city in cities_data:
-            city_name = city['city_name'].split(',')[0].strip()
-            map_path = f"{city['city_name'].split(',')[1].strip()}/{city_name}/map.html"
-            
-            # Check if map exists
-            if (self.output_dir / map_path).exists():
+        for _, row in df.iterrows():
+            try:
+                # Get city name with error handling
+                city_name = row.get('city_name', 'Unknown')
+                
+                # Handle potential errors in city_name format
+                try:
+                    if ',' in city_name:
+                        country_code = city_name.split(',')[1].strip()
+                        city = city_name.split(',')[0].strip()
+                    else:
+                        country_code = row.get('country_code', 'Unknown')
+                        city = city_name
+                except Exception:
+                    country_code = row.get('country_code', 'Unknown')
+                    city = city_name
+                
+                # Sanitize values for path construction
+                city = city.replace('/', '_').replace('\\', '_')
+                country_code = country_code.replace('/', '_').replace('\\', '_')
+                
+                # Create paths
+                map_path = f"{country_code}/{city}/map.html"
+                summary_path = f"{country_code}/{city}/summary.json"
+                
+                # Get other values with defaults
+                population = row.get('population', 0)
+                total_street_ends = row.get('total_street_ends', 0)
+                
+                # Check if map exists
+                if (self.output_dir / map_path).exists():
+                    rows += f"""
+                        <tr>
+                            <td>{city_name}</td>
+                            <td>{country_code}</td>
+                            <td>{population:,}</td>
+                            <td>{total_street_ends}</td>
+                            <td>
+                                <a href="{map_path}" target="_blank" class="btn btn-sm btn-primary">View Map</a>
+                            </td>
+                            <td>
+                                <a href="{summary_path}" target="_blank" class="btn btn-sm btn-primary">View raw data</a>
+                            </td>
+                        </tr>
+                    """
+                else:
+                    rows += f"""
+                        <tr>
+                            <td>{city_name}</td>
+                            <td>{country_code}</td>
+                            <td>{population:,}</td>
+                            <td>{total_street_ends}</td>
+                            <td colspan="2">No map available</td>
+                        </tr>
+                    """
+            except Exception as e:
+                self.logger.error(f"Error generating table row: {str(e)}", exc_info=True)
+                # Add a fallback row with error information
                 rows += f"""
                     <tr>
-                        <td>{city['city_name']}</td>
-                        <td>{city['country_code']}</td>
-                        <td>{city['population']}</td>
-                        <td>{city['total_street_ends']}</td>
-                        <td><a href="{map_path}" target="_blank" class="btn btn-sm btn-primary">View Map</a></td>
-                    </tr>
-                """
-            else:
-                rows += f"""
-                    <tr>
-                        <td>{city['city_name']}</td>
-                        <td>{city['total_street_ends']}</td>
-                        <td>No map available</td>
+                        <td colspan="6" class="text-danger">Error processing city data: {str(e)}</td>
                     </tr>
                 """
         return rows
@@ -484,6 +589,34 @@ class GlobalCityAnalyzer:
             return None
 
     @log_timing
+    def analyze_city(self, city_row):
+        """
+        Analyze a single city by running both stage 1 and stage 2 sequentially.
+        This is used by run_global_analysis and run_us_analysis methods.
+        """
+        try:
+            city_name = f"{city_row['name']}, {city_row['country_code']}"
+            self.logger.info(f"Processing {city_name}")
+            
+            # Run stage 1 - find street ends
+            stage1_result = self.analyze_city_stage1(city_row)
+            if not stage1_result:
+                self.logger.warning(f"Stage 1 failed for {city_name}")
+                return None
+                
+            # Run stage 2 - enrich data and create map
+            stage2_result = self.analyze_city_stage2(city_row)
+            if not stage2_result:
+                self.logger.warning(f"Stage 2 failed for {city_name}")
+                return None
+                
+            return stage2_result
+            
+        except Exception as e:
+            self.logger.error(f"Error analyzing {city_row['name']}: {str(e)}", exc_info=True)
+            return None
+
+    @log_timing
     def run_global_analysis_stage3(self, results_dir=None):
         """
         Stage 3: Generate comprehensive reports from completed analyses
@@ -507,52 +640,113 @@ class GlobalCityAnalyzer:
                         try:
                             with open(summary_file) as f:
                                 summary = json.load(f)
-                                if not all(key in summary for key in ['type', 'properties', 'features']):
-                                    self.logger.warning(f"Invalid summary structure in {summary_file}")
+                                # Validate summary structure with better error handling
+                                if not isinstance(summary, dict):
+                                    self.logger.warning(f"Invalid summary format in {summary_file} - not a dictionary")
                                     continue
-                                if not all(key in summary['properties'] for key in ['city_name', 'population', 'total_street_ends']):
-                                    self.logger.warning(f"Missing required properties in {summary_file}")
-                                    continue
-                                if not summary['features']:
-                                    self.logger.warning(f"No features found in {summary_file}")
-                                    continue
+                                    
+                                # Check and fix required keys
+                                if 'type' not in summary:
+                                    self.logger.warning(f"Missing 'type' in {summary_file}, adding default")
+                                    summary['type'] = 'FeatureCollection'
+                                    
+                                if 'features' not in summary:
+                                    self.logger.warning(f"Missing 'features' in {summary_file}, adding empty list")
+                                    summary['features'] = []
+                                    
+                                if 'properties' not in summary:
+                                    self.logger.warning(f"Missing 'properties' in {summary_file}, adding default")
+                                    summary['properties'] = {
+                                        'city_name': city_dir.name,
+                                        'country_code': country_dir.name,
+                                        'name': city_dir.name,
+                                        'population': 0,
+                                        'total_street_ends': 0,
+                                        'latitude': 0,
+                                        'longitude': 0,
+                                        'analysis_date': datetime.now().isoformat()
+                                    }
+                                
+                                # Ensure all required properties exist
+                                required_props = ['city_name', 'country_code', 'name', 'population', 
+                                                 'total_street_ends', 'latitude', 'longitude', 'analysis_date']
+                                for prop in required_props:
+                                    if prop not in summary['properties']:
+                                        self.logger.warning(f"Missing property '{prop}' in {summary_file}, adding default")
+                                        if prop in ['population', 'total_street_ends', 'latitude', 'longitude']:
+                                            summary['properties'][prop] = 0
+                                        elif prop == 'analysis_date':
+                                            summary['properties'][prop] = datetime.now().isoformat()
+                                        else:
+                                            summary['properties'][prop] = city_dir.name if prop == 'name' else \
+                                                                         f"{city_dir.name}, {country_dir.name}" if prop == 'city_name' else \
+                                                                         country_dir.name
+                                
+                                # Now that we've fixed any issues, add to summaries
                                 summaries.append(summary)
                                 self.analyzed_cities.append(summary['properties']['city_name'])
+                                
+                                # Optionally save the fixed summary back to file
+                                with open(summary_file, 'w') as f_out:
+                                    json.dump(summary, f_out, indent=2)
+                                    
                         except Exception as e:
-                            self.logger.error(f"Error reading {summary_file}: {str(e)}")
+                            self.logger.error(f"Error reading {summary_file}: {str(e)}", exc_info=True)
             
             if not summaries:
                 self.logger.error("No summary files found to generate report")
                 return
             
-            # Convert summaries to DataFrame for analysis
-            df = pd.DataFrame([{
-                'city_name': s['properties']['city_name'],
-                'country_code': s['properties']['country_code'],
-                'name': s['properties']['name'],
-                'population': s['properties']['population'],
-                'total_street_ends': s['properties']['total_street_ends'],
-                'latitude': s['properties']['latitude'],
-                'longitude': s['properties']['longitude'],
-                'analysis_date': s['properties']['analysis_date'],
-                'features': len(s['features'])
-            } for s in summaries])
+            # Convert summaries to DataFrame for analysis with error handling
+            df_data = []
+            for s in summaries:
+                try:
+                    props = s['properties']
+                    df_data.append({
+                        'city_name': props.get('city_name', 'Unknown'),
+                        'country_code': props.get('country_code', 'Unknown'),
+                        'name': props.get('name', 'Unknown'),
+                        'population': props.get('population', 0),
+                        'total_street_ends': props.get('total_street_ends', 0),
+                        'latitude': props.get('latitude', 0),
+                        'longitude': props.get('longitude', 0),
+                        'analysis_date': props.get('analysis_date', datetime.now().isoformat()),
+                        'features': len(s.get('features', []))
+                    })
+                except Exception as e:
+                    self.logger.error(f"Error processing summary: {str(e)}", exc_info=True)
             
-            # Generate statistics
-            stats = {
-                'total_cities_analyzed': int(len(summaries)),
-                'total_street_ends_found': int(df['total_street_ends'].sum()),
-                'average_street_ends_per_city': float(df['total_street_ends'].mean()),
-                'cities_by_street_ends': df[['city_name', 'total_street_ends']].sort_values('total_street_ends', ascending=False).to_dict('records'),
-                'analysis_date': datetime.now().isoformat()
-            }
+            df = pd.DataFrame(df_data)
+            
+            # Generate statistics with error handling
+            try:
+                stats = {
+                    'total_cities_analyzed': int(len(summaries)),
+                    'total_street_ends_found': int(df['total_street_ends'].sum()),
+                    'average_street_ends_per_city': float(df['total_street_ends'].mean()),
+                    'cities_by_street_ends': df[['city_name', 'total_street_ends']].sort_values('total_street_ends', ascending=False).to_dict('records'),
+                    'analysis_date': datetime.now().isoformat()
+                }
+            except Exception as e:
+                self.logger.error(f"Error calculating statistics: {str(e)}", exc_info=True)
+                stats = {
+                    'total_cities_analyzed': len(summaries),
+                    'total_street_ends_found': 0,
+                    'average_street_ends_per_city': 0,
+                    'cities_by_street_ends': [],
+                    'analysis_date': datetime.now().isoformat()
+                }
             
             # Save statistics
             with open(results_dir / 'global_statistics.json', 'w') as f:
                 json.dump(stats, f, indent=2)
             
-            # Generate map link
-            map_link = self.maps_exporter.export_cities(self.analyzed_cities)
+            # Generate map link with error handling
+            try:
+                map_link = self.maps_exporter.export_cities(self.analyzed_cities)
+            except Exception as e:
+                self.logger.error(f"Error generating map link: {str(e)}", exc_info=True)
+                map_link = "#"
             
             # Generate HTML report
             html_report = f"""
@@ -582,7 +776,8 @@ class GlobalCityAnalyzer:
                                     <th>Country</th>
                                     <th>Population</th>
                                     <th>Street Ends</th>
-                                    <th>Action</th>
+                                    <th>Map</th>
+                                    <th>Data</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -602,68 +797,46 @@ class GlobalCityAnalyzer:
         except Exception as e:
             self.logger.error(f"Error in Stage 3: {str(e)}", exc_info=True)
 
-    def _generate_table_rows(self, df: pd.DataFrame) -> str:
-        """Generate HTML table rows from DataFrame"""
-        rows = ""
-        for _, row in df.iterrows():
-            city_name = row['city_name']
-            country_code = city_name.split(',')[1].strip()
-            city = city_name.split(',')[0].strip()
-            map_path = f"{country_code}/{city}/map.html"
-            summary_path = f"{country_code}/{city}/summary.json"
-            
-            # Check if map exists
-            if (self.output_dir / map_path).exists():
-                rows += f"""
-                    <tr>
-                        <td>{city_name}</td>
-                        <td>{country_code}</td>
-                        <td>{row['population']:,}</td>
-                        <td>{row['total_street_ends']}</td>
-                        <td>
-                            <a href="{map_path}" target="_blank" class="btn btn-sm btn-primary">View Map</a>
-                        </td>
-                        <td>
-                            <a href="{summary_path}" target="_blank" class="btn btn-sm btn-primary">View raw data</a>
-                        </td>
-                    </tr>
-                """
-            else:
-                rows += f"""
-                    <tr>
-                        <td>{city_name}</td>
-                        <td>{row['total_street_ends']}</td>
-                        <td>{row['population']:,}</td>
-                        <td>No map available</td>
-                    </tr>
-                """
-        return rows
-
 if __name__ == "__main__":
     # cities_to_run = ["Skokie", "Chicago", "Toronto"]
-    cities_to_run = [ 'Skokie', "Chicago"]
+    cities_to_run = ['Skokie', "Chicago"]
 
-    # Stage 1
-    analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False, update_existing=True)
-    analyzer_stage1.run_global_analysis_stage1(
-        # num_cities=len(cities_to_run),
-        target_cities=['Skokie', 'Chicago']
-    )
-
-    # analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False, max_workers=4)
+    # Example 1: Run Stage 1 sequentially (default)
+    analyzer_stage1 = GlobalCityAnalyzer(find_street_ends=True, enrich_data=False, update_existing=False)
     # analyzer_stage1.run_global_analysis_stage1(
-    #     # num_cities=300,
     #     target_cities=cities_to_run
     # )
 
-    # Stage 2
-    analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=True, update_existing=True)
-    results = analyzer_stage2.run_global_analysis_stage2(
-        # num_cities=300,
-        target_cities=['Skokie', 'Chicago']
-    )
-    # analyzer_stage2.generate_report(results)
+    # Example 2: Run Stage 1 with multithreading (explicitly enabled)
+    # analyzer_stage1_mt = GlobalCityAnalyzer(
+    #     find_street_ends=True, 
+    #     enrich_data=False, 
+    #     update_existing=False,
+    #     use_multithreading=True,  # Enable multithreading
+    #     max_workers=4
+    # )
+    # analyzer_stage1_mt.run_global_analysis_stage1(
+    #     target_cities=cities_to_run
+    # )
 
-    # Stage 3: Generate report
+    # Example 3: Run Stage 2 sequentially (default)
+    analyzer_stage2 = GlobalCityAnalyzer(find_street_ends=False, enrich_data=False, update_existing=False)
+    # results = analyzer_stage2.run_global_analysis_stage2(
+    #     target_cities=['Chicago']
+    # )
+
+    # Example 4: Run Stage 2 with multithreading (explicitly enabled)
+    analyzer_stage2_mt = GlobalCityAnalyzer(
+        find_street_ends=False, 
+        enrich_data=True, 
+        update_existing=False,
+        use_multithreading=True,  # Enable multithreading
+        max_workers=4
+    )
+    results_mt = analyzer_stage2_mt.run_global_analysis_stage2(
+        num_cities=200, use_multithreading=True
+    )
+
+    # Stage 3: Generate report (always runs sequentially)
     analyzer_stage3 = GlobalCityAnalyzer()
     analyzer_stage3.run_global_analysis_stage3()

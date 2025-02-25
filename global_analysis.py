@@ -34,7 +34,7 @@ def log_timing(func: Callable) -> Callable:
 
 class GlobalCityAnalyzer:
     def __init__(self, **kwargs):
-        self.output_dir = Path('global_analysis')
+        self.output_dir = kwargs.get('output_dir', Path('global_analysis'))
         self.output_dir.mkdir(exist_ok=True)
         self.logger = setup_logger('global_analyzer')
         self.maps_exporter = GoogleMapsExporter()

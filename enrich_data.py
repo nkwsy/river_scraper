@@ -23,6 +23,81 @@ load_dotenv()
 
 logger = setup_logger(__name__)
 
+def get_city_info(city_name: str, country_code: str = None) -> Dict:
+    """
+    Get detailed information about a city using GeoNames database.
+    
+    Args:
+        city_name (str): Name of the city
+        country_code (str, optional): Two-letter country code (ISO-3166)
+    
+    Returns:
+        Dict: City information including:
+            - name: Official name
+            - latitude: City center latitude
+            - longitude: City center longitude
+            - population: Population count
+            - country_code: Two-letter country code
+            - timezone: City timezone
+            - admin_codes: Administrative region codes
+            - geometry: City boundary polygon (if available via OSMnx)
+    """
+    try:
+        # Download and read GeoNames data
+        url = "http://download.geonames.org/export/dump/cities15000.zip"
+        df = pd.read_csv(url, compression='zip', sep='\t', header=None,
+                        names=['geonameid', 'name', 'asciiname', 'alternatenames', 'latitude', 
+                               'longitude', 'feature_class', 'feature_code', 'country_code', 
+                               'cc2', 'admin1_code', 'admin2_code', 'admin3_code', 'admin4_code',
+                               'population', 'elevation', 'dem', 'timezone', 'modification_date'])
+        
+        # Filter for the city
+        city_filter = df['name'].str.lower() == city_name.lower()
+        if country_code:
+            city_filter &= df['country_code'] == country_code.upper()
+        city_filter &= df['feature_class'] == 'P'  # Populated places only
+        
+        city_data = df[city_filter]
+        
+        if city_data.empty:
+            logger.warning(f"City not found: {city_name}" + 
+                         f" (country: {country_code})" if country_code else "")
+            return None
+            
+        # Get the most populous match if multiple exist
+        city_info = city_data.sort_values('population', ascending=False).iloc[0]
+        
+        # Try to get city geometry from OSMnx
+        try:
+            gdf = ox.geocode_to_gdf(f"{city_name}, {city_info['country_code']}")
+            geometry = gdf.geometry.iloc[0] if not gdf.empty else None
+        except Exception as e:
+            logger.warning(f"Could not fetch city geometry: {str(e)}")
+            geometry = None
+        
+        # Construct result dictionary
+        result = {
+            'name': city_info['name'],
+            'latitude': float(city_info['latitude']),
+            'longitude': float(city_info['longitude']),
+            'population': int(city_info['population']),
+            'country_code': city_info['country_code'],
+            'timezone': city_info['timezone'],
+            'admin_codes': {
+                'admin1': city_info['admin1_code'],
+                'admin2': city_info['admin2_code'],
+                'admin3': city_info['admin3_code'],
+                'admin4': city_info['admin4_code']
+            },
+            'geometry': geometry
+        }
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error getting city information: {str(e)}")
+        return None
+
 @dataclass
 class LocationConfig:
     radius_km: float
@@ -219,7 +294,7 @@ class LocationEnricher:
                 'greenspace_score': 0
             }
 
-    def _get_waterway_info(self, point: Point, fetch_radius_km=0.5) -> Dict:
+    def _get_waterway_info(self, point: Point, fetch_radius_km=0.25) -> Dict:
         """Get waterway info with improved error handling and caching"""
         try:
             # Use a stable cache key based on rounded coordinates (for nearby points)
@@ -549,6 +624,29 @@ class LocationEnricher:
         with open(geojson_file) as f:
             geojson = json.load(f)
 
+        # Extract city name from the file path
+        # Assumes path structure like "global_analysis/US/Chicago/street_ends.geojson"
+        path_parts = os.path.normpath(geojson_file).split(os.sep)
+        try:
+            country_code = path_parts[-3]  # e.g., "US"
+            city_name = path_parts[-2]     # e.g., "Chicago"
+            
+            # Get city information
+            city_info = get_city_info(city_name, country_code)
+            if city_info:
+                # Add city info directly to FeatureCollection properties
+                if 'properties' not in geojson:
+                    geojson['properties'] = {}
+                
+                # Remove geometry from city info to avoid redundancy
+                if 'geometry' in city_info:
+                    del city_info['geometry']
+                    
+                geojson['properties'].update(city_info)
+                
+        except (IndexError, Exception) as e:
+            self.logger.warning(f"Could not extract city information from path: {str(e)}")
+
         features = geojson['features'][:self.config.max_locations] if self.config.max_locations > 0 else geojson['features']
         self.logger.info(f"Processing {len(features)} locations from {geojson_file}")
         
@@ -563,7 +661,8 @@ class LocationEnricher:
         self.logger.info(f"Grouped {len(features)} locations into {len(location_groups)} proximity groups")
         
         # Process groups with controlled concurrency
-        results = []
+        all_results = []
+        location_index = 0
         
         # Determine concurrency approach based on configuration
         if self.config.use_multithreading:
@@ -576,8 +675,6 @@ class LocationEnricher:
             
             # Create tasks for each group
             tasks = []
-            location_index = 0
-            
             for group in location_groups:
                 tasks.append(process_group_with_semaphore(group, location_index))
                 location_index += len(group)
@@ -586,21 +683,17 @@ class LocationEnricher:
             group_results = await asyncio.gather(*tasks)
             
             # Flatten results
-            all_results = []
             for group_result in group_results:
                 all_results.extend(group_result)
         else:
             # Process groups sequentially
             self.logger.info("Using sequential processing")
-            all_results = []
-            location_index = 0
-            
             for group in tqdm(location_groups, desc="Processing location groups"):
                 group_result = await self.process_group(group, location_index)
                 all_results.extend(group_result)
                 location_index += len(group)
         
-        # Update feature properties
+        # Update feature properties with results
         for feature, result in zip(features, all_results):
             feature['properties'].update(result)
 
@@ -641,8 +734,8 @@ if __name__ == "__main__":
         save_detailed_json=True,
         batch_size=10,
         cache_osm_data=True,
-        concurrency_limit=1,
-        use_multithreading=False  # Default is False, but explicitly set here for clarity
+        concurrency_limit=6,
+        use_multithreading=True  # Default is False, but explicitly set here for clarity
     )
 
     enricher = LocationEnricher(config)

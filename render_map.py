@@ -3,6 +3,7 @@ import geopandas as gpd
 import json
 from utils.logging_config import setup_logger
 from utils.osmnx_load import get_ox
+import numpy as np
 ox = get_ox()
 import os
 
@@ -13,7 +14,7 @@ class StreetEndRenderer:
     location data, images, and external map links.
     """
     
-    def __init__(self, points_file, location, summary_file=None, **kwargs):
+    def __init__(self, summary_file=None, location=None, **kwargs):
         """
         Args:
             points_file (str): Path to GeoJSON with street end points (not used if summary_file provided)
@@ -158,14 +159,14 @@ class StreetEndRenderer:
             popup_html += f"<strong>Distance to Water:</strong> {properties['distance_to_water']}m<br>"
         
         # Add enriched data if available
-        if 'population' in properties:
+        if 'population' in properties and properties['population'] is not np.nan:
             pop_data = properties['population']
             popup_html += "<div style='margin: 10px 0;'>"
             popup_html += f"<strong>Population Density:</strong> {pop_data.get('population_density', 0):.1f}/km²<br>"
             popup_html += f"<strong>Building Count:</strong> {pop_data.get('building_count', 0)}<br>"
             popup_html += "</div>"
         
-        if 'greenspace' in properties:
+        if 'greenspace' in properties and properties['greenspace'] is not np.nan:
             green_data = properties['greenspace']
             popup_html += "<div style='margin: 10px 0;'>"
             popup_html += f"<strong>Green Space:</strong> {green_data.get('green_percentage', 0):.1f}%<br>"
@@ -174,18 +175,18 @@ class StreetEndRenderer:
             popup_html += f"<strong>Park Access Score:</strong> {green_data.get('park_distance_score', 0):.1f}/100<br>"
             popup_html += "</div>"
         
-        if 'waterway' in properties:
+        if 'waterway' in properties and properties['waterway'] is not np.nan:
             water_data = properties['waterway']
             popup_html += "<div style='margin: 10px 0;'>"
             popup_html += f"<strong>Waterway:</strong> {water_data.get('name', 'Unknown')}<br>"
             popup_html += f"<strong>Type:</strong> {water_data.get('type', 'Unknown')}<br>"
             popup_html += "</div>"
         
-        if 'desirability_score' in properties:
+        if 'desirability_score' in properties and properties['desirability_score'] is not None:
             popup_html += f"<strong>Desirability Score:</strong> {properties['desirability_score']:.1f}/100<br>"
         
         # Add images if available
-        if 'images' in properties and properties['images']:
+        if 'images' in properties and properties['images'] is not np.nan:
             for img_type, img_path in properties['images'].items():
                 if img_path:
                     rel_path = os.path.relpath(img_path, start=self.output_dir)
@@ -243,7 +244,7 @@ class StreetEndRenderer:
             """
         self.map.get_root().html.add_child(folium.Element(legend_html))
 
-    def render(self, output_file='street_ends_map.html'):
+    def render(self, output_file='map.html'):
         """Create and save the complete map"""
         self.get_water_features()
         self.create_map()
@@ -256,9 +257,9 @@ class StreetEndRenderer:
 # Example usage:
 if __name__ == "__main__":
     # Basic usage
-    renderer = StreetEndRenderer('street_ends_near_river.geojson', "Chicago, USA")
-    renderer.render()
-
+    renderer = StreetEndRenderer('global_analysis/US/Chicago/summary.json', "Chicago, US")
+    renderer.render('global_analysis/US/Chicago/map.html')
+	
     # Custom usage
     # renderer = StreetEndRenderer(
     #     points_file='my_points.geojson',

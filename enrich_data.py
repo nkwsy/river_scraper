@@ -14,6 +14,7 @@ from shapely.geometry import Point, box
 from shapely.ops import unary_union
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from tqdm import tqdm
 
 from utils.logging_config import setup_logger
 from utils.osmnx_load import get_ox
@@ -32,6 +33,7 @@ class LocationConfig:
     batch_size: int = 10  # Process locations in batches
     cache_osm_data: bool = True  # Enable OSM data caching
     concurrency_limit: int = 5  # Number of concurrent location processings
+    use_multithreading: bool = False  # Whether to use multithreading for data fetching
 
 
 class LocationEnricher:
@@ -435,15 +437,22 @@ class LocationEnricher:
         # Launch tasks concurrently
         images_task = self.get_location_images(lat, lon, location_id)
         
-        # Get OSM data in a thread pool
-        with ThreadPoolExecutor() as executor:
-            osm_future = executor.submit(self._get_osm_data_cached, buffer_area, lat, lon)
-            waterway_future = executor.submit(self._get_waterway_info, point)
-        
-        # Wait for all tasks to complete
-        images = await images_task
-        osm_data = osm_future.result()
-        waterway_info = waterway_future.result()
+        # Get OSM data - either with threading or sequentially
+        if self.config.use_multithreading:
+            # Use thread pool for concurrent processing
+            with ThreadPoolExecutor() as executor:
+                osm_future = executor.submit(self._get_osm_data_cached, buffer_area, lat, lon)
+                waterway_future = executor.submit(self._get_waterway_info, point)
+            
+            # Wait for all tasks to complete
+            images = await images_task
+            osm_data = osm_future.result()
+            waterway_info = waterway_future.result()
+        else:
+            # Process sequentially
+            images = await images_task
+            osm_data = self._get_osm_data_cached(buffer_area, lat, lon)
+            waterway_info = self._get_waterway_info(point)
         
         # Calculate metrics
         population_metrics = self.calculate_population_metrics(
@@ -528,7 +537,15 @@ class LocationEnricher:
         return results
 
     async def process_locations(self, geojson_file: str) -> Dict:
-        """Process locations with batch processing for nearby locations"""
+        """
+        Process locations from a GeoJSON file
+        
+        Args:
+            geojson_file: Path to GeoJSON file with locations
+            
+        Returns:
+            Dict: Updated GeoJSON with enriched properties
+        """
         with open(geojson_file) as f:
             geojson = json.load(f)
 
@@ -547,27 +564,41 @@ class LocationEnricher:
         
         # Process groups with controlled concurrency
         results = []
-        sem = asyncio.Semaphore(self.config.concurrency_limit)
         
-        async def process_group_with_semaphore(group, start_idx):
-            async with sem:
-                return await self.process_group(group, start_idx)
-        
-        # Create tasks for each group
-        tasks = []
-        location_index = 0
-        
-        for group in location_groups:
-            tasks.append(process_group_with_semaphore(group, location_index))
-            location_index += len(group)
-        
-        # Execute all tasks
-        group_results = await asyncio.gather(*tasks)
-        
-        # Flatten results
-        all_results = []
-        for group_result in group_results:
-            all_results.extend(group_result)
+        # Determine concurrency approach based on configuration
+        if self.config.use_multithreading:
+            self.logger.info(f"Using concurrent processing with limit of {self.config.concurrency_limit}")
+            sem = asyncio.Semaphore(self.config.concurrency_limit)
+            
+            async def process_group_with_semaphore(group, start_idx):
+                async with sem:
+                    return await self.process_group(group, start_idx)
+            
+            # Create tasks for each group
+            tasks = []
+            location_index = 0
+            
+            for group in location_groups:
+                tasks.append(process_group_with_semaphore(group, location_index))
+                location_index += len(group)
+            
+            # Execute all tasks
+            group_results = await asyncio.gather(*tasks)
+            
+            # Flatten results
+            all_results = []
+            for group_result in group_results:
+                all_results.extend(group_result)
+        else:
+            # Process groups sequentially
+            self.logger.info("Using sequential processing")
+            all_results = []
+            location_index = 0
+            
+            for group in tqdm(location_groups, desc="Processing location groups"):
+                group_result = await self.process_group(group, location_index)
+                all_results.extend(group_result)
+                location_index += len(group)
         
         # Update feature properties
         for feature, result in zip(features, all_results):
@@ -601,17 +632,36 @@ class LocationEnricher:
             await self.session.close()
 
 if __name__ == "__main__":
+    # Example 1: Sequential processing (default)
     config = LocationConfig(
         radius_km=1.0,
-        output_dir="location_data/US/Chicago",
-        max_locations=-1,
+        output_dir="global_analysis/US/Chicago",
+        max_locations=50,
         save_images=False,
         save_detailed_json=True,
         batch_size=10,
         cache_osm_data=True,
-        concurrency_limit=1
+        concurrency_limit=1,
+        use_multithreading=False  # Default is False, but explicitly set here for clarity
     )
 
     enricher = LocationEnricher(config)
-    asyncio.run(enricher.process_locations("location_data/US/Chicago/street_ends.geojson"))
+    asyncio.run(enricher.process_locations("global_analysis/US/Chicago/street_ends.geojson"))
     asyncio.run(enricher.cleanup())
+    
+    # Example 2: Concurrent processing (explicitly enabled)
+    # config_mt = LocationConfig(
+    #     radius_km=1.0,
+    #     output_dir="location_data/US/Chicago",
+    #     max_locations=10,
+    #     save_images=False,
+    #     save_detailed_json=True,
+    #     batch_size=10,
+    #     cache_osm_data=True,
+    #     concurrency_limit=5,  # Higher limit for concurrent processing
+    #     use_multithreading=True  # Enable multithreading
+    # )
+    #
+    # enricher_mt = LocationEnricher(config_mt)
+    # asyncio.run(enricher_mt.process_locations("location_data/US/Chicago/street_ends.geojson"))
+    # asyncio.run(enricher_mt.cleanup())

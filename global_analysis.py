@@ -146,7 +146,10 @@ class GlobalCityAnalyzer:
                     output_dir=city_dir,
                     max_locations=-1,
                     save_images=False,
-                    save_detailed_json=True
+                    save_detailed_json=True,
+                    batch_size=10,
+                    cache_osm_data=True,
+                    concurrency_limit=1,
                 )
                 enricher = LocationEnricher(config)
                 # Use asyncio.run to run the async method in a sync context
